@@ -1,0 +1,44 @@
+{
+  "name": "pi-jinyong-xia",
+  "version": "1.0.0",
+  "description": "金庸武侠宠物 - 根据你的MBTI匹配金庸主角，修炼武功，陪伴编程",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "main": "reload-entry.js",
+  "files": [
+    "dist",
+    "extensions",
+    "skills",
+    "reload-entry.js",
+    "LICENSE",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./reload-entry.js"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npx tsx tests/run-all.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.75.3",
+    "@earendil-works/pi-coding-agent": "^0.75.3",
+    "@earendil-works/pi-tui": "^0.75.3",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
