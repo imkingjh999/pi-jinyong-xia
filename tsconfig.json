@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "sourceMap": true,
+    "resolveJsonModule": true
+  },
+  "include": ["extensions/index.ts", "extensions/pet.ts", "extensions/wuxue.ts", "extensions/characters.ts", "extensions/state.ts", "extensions/animation-engine.ts", "extensions/animation-player.ts", "extensions/video-player.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
