@@ -22,8 +22,14 @@ export const ELEMENT_SYMBOL: Record<Element, string> = {
 export function getElementMultiplier(atk: Element, def: Element): number {
 	if (OVERCOMES[atk] === def) return 1.5;
 	if (OVERCOMES[def] === atk) return 0.7;
-	if (GENERATES[atk] === def) return 0.9;
 	return 1.0;
+}
+
+/** 返回元素加成标签："克制" | "被克" | "" */
+export function getElementBonusLabel(atk: Element, def: Element): string {
+	if (OVERCOMES[atk] === def) return "克制";
+	if (OVERCOMES[def] === atk) return "被克";
+	return "";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -112,4 +118,50 @@ export interface BattleLog { turn: number; attacker: string; damage: number; ele
 export interface BattleResult {
 	won: boolean; playerHp: number; bossHpLeft: number; bossName: string; bossElement: Element;
 	logs: BattleLog[]; goldReward: number; xpReward: number; skillXpReward: number;
+}
+
+/** 手动战斗状态 */
+export type TurnAction = "attack" | "skill" | "defend" | "item" | "flee";
+export interface BattleState {
+	playerHp: number;
+	playerMaxHp: number;
+	bossHp: number;
+	bossMaxHp: number;
+	bossName: string;
+	bossElement: Element;
+	turn: number;
+	playerAtk: number;
+	playerDef: number;
+	bossAtk: number;
+	bossDef: number;
+	weaponElement: Element;
+	skillElement?: Element;
+	skillLevel: number;
+	skillDmgBase: number;
+	skillTriggerInterval: number;
+	weaponAttack: number;
+	logs: BattleLog[];
+}
+export interface TurnResult {
+	logs: BattleLog[];
+	over: boolean;        // 战斗是否结束
+	won?: boolean;        // 如果结束，是否胜利
+	fled?: boolean;       // 是否逃跑
+	dice?: DiceEvent;     // 本回合骰子事件
+}
+
+/** 🎲 骰子随机事件 */
+export type DiceEventType = "暴击" | "闪避" | "元素共鸣" | "破防" | "回春" | "虚弱" | "普通";
+export interface DiceEvent {
+	roll: number;          // 1-6
+	event: DiceEventType;  // 触发的事件
+	target: "player" | "boss" | "both";  // 谁受影响
+	desc: string;          // 描述文本
+}
+export interface BattleAction {
+	id: string;
+	label: string;        // UI 显示文本
+	type: TurnAction;
+	desc: string;         // 行动描述
+	emoji: string;        // 显示图标
 }

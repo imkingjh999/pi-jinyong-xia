@@ -6,8 +6,8 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { homedir } from "node:os";
-import { createHash } from "node:crypto";
+import { homedir, hostname, userInfo, platform, arch } from "node:os";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import type { WuxueState } from "./wuxue.js";
 import { createInitialState, migrateSkills, getSkill } from "./wuxue.js";
 import { CHARACTERS } from "./characters.js";
@@ -21,6 +21,45 @@ export interface OwnedSkill {
 	id: string;       // 武功 id，对应 SKILL_POOL
 	level: number;    // 武功等级 1-20
 	xp: number;       // 当前经验
+}
+
+/** 任务风险等级 */
+export type RiskLevel = "safe" | "low" | "medium" | "high" | "extreme";
+
+/** 任务状态 */
+export type MissionStatus = "available" | "active" | "completed" | "failed" | "abandoned";
+
+/** 任务记录 */
+export interface MissionRecord {
+	id: string;              // 任务实例 ID
+	templateId: string;      // 任务模板 ID
+	name: string;
+	description: string;
+	risk: RiskLevel;
+	status: MissionStatus;
+	goldReward: number;
+	xpReward: number;
+	hpCost: number;          // 消耗/损失的血量
+	startedAt: number;
+	completedAt: number | null;
+	requiredPlanSteps: number; // 需要的计划步骤数
+	completedPlanSteps: number; // 已完成的计划步骤
+	planChoices: string[];     // 计划步骤选项 ID (MBTI 映射)
+}
+
+/** 任务偏好追踪 */
+export interface MissionPreferences {
+	totalCompleted: number;    // 完成总数
+	totalFailed: number;      // 失败总数
+	riskProfile: {            // 风险偏好统计
+		safe: number;
+		low: number;
+		medium: number;
+		high: number;
+		extreme: number;
+	};
+	favoriteType: string | null;  // 最喜欢的任务类型 (templateId)
+	lastMissionAt: number;     // 上次任务时间
 }
 
 export interface PetState {
@@ -39,19 +78,37 @@ export interface PetState {
 	wuxue: WuxueState;
 	createdAt: number;
 	lastActiveAt: number;
+	// Ed25519 non-repudiation (generated on first run)
+	SignPublicKey: string | null;    // base64 Ed25519 public key
+	SignPrivateKey: string | null;   // base64 Ed25519 private key (never leaves this machine)
+	// Telemetry (上传需邮箱)
+	email: string | null;            // 用户邮箱（开启遥测时必须填写）
+	// 任务系统
+	missions: MissionRecord[];       // 已完成/进行中的任务记录
+	missionPreferences: MissionPreferences;  // 任务偏好追踪
+	// 帮派系统
+	factionId: string | null;        // 加入的门派 ID
+	factionContribution: number;     // 门派贡献度
+	joinedFactionAt: number | null;  // 加入门派时间
+	// 职业系统
+	professionId: string | null;     // 选择的职业 ID
+	joinedProfessionAt: number | null; // 选择职业时间
+	// 成长天赋
+	talents: string[];               // 已学习天赋 ID 列表
+	talentPoints: number;            // 可用天赋点
+	lastTelemetryUpload: number;     // 上次成功上传遥测的时间戳
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STATE FILE
 // ═══════════════════════════════════════════════════════════════════════════
 
-const STATE_VERSION = 6;
+const STATE_VERSION = 9;
 
 /** Generate a stable OS-based user ID */
 export function generateUserId(): string {
 	try {
-		const os = require("node:os");
-		const raw = `${os.hostname()}:${os.userInfo().username}:${os.platform()}:${os.arch()}`;
+		const raw = `${hostname()}:${userInfo().username}:${platform()}:${arch()}`;
 		return createHash("sha256").update(raw).digest("hex").substring(0, 16);
 	} catch {
 		return createHash("sha256").update(`unknown:${Date.now()}`).digest("hex").substring(0, 16);
@@ -86,7 +143,46 @@ export function createInitialPetState(): PetState {
 		wuxue: createInitialState(),
 		createdAt: Date.now(),
 		lastActiveAt: Date.now(),
+		SignPublicKey: null,
+		SignPrivateKey: null,
+		email: null,
+		missions: [],
+		missionPreferences: {
+			totalCompleted: 0,
+			totalFailed: 0,
+			riskProfile: { safe: 0, low: 0, medium: 0, high: 0, extreme: 0 },
+			favoriteType: null,
+			lastMissionAt: 0,
+		},
+		// 帮派
+		factionId: null,
+		factionContribution: 0,
+		joinedFactionAt: null,
+		// 职业
+		professionId: null,
+		joinedProfessionAt: null,
+		// 天赋
+		talents: [],
+		talentPoints: 0,
+		lastTelemetryUpload: 0,
 	};
+}
+
+/** Generate Ed25519 key pair for payload signing */
+export function generateSigningKeys(): { publicKey: string; privateKey: string } {
+	const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+	// Export as base64 for JSON serialization
+	const pubB64 = publicKey.export({ type: "spki", format: "der" }).toString("base64");
+	const privB64 = privateKey.export({ type: "pkcs8", format: "der" }).toString("base64");
+	return { publicKey: pubB64, privateKey: privB64 };
+}
+
+/** Ensure signing keys exist, generating if needed */
+export function ensureSigningKeys(state: PetState): void {
+	if (state.SignPublicKey && state.SignPrivateKey) return;
+	const keys = generateSigningKeys();
+	state.SignPublicKey = keys.publicKey;
+	state.SignPrivateKey = keys.privateKey;
 }
 
 export function loadState(): PetState {
@@ -149,6 +245,31 @@ export function loadState(): PetState {
 			// v5→v6: userId and telemetry
 			if (!state.userId) state.userId = generateUserId();
 			if (state.telemetryEnabled === undefined) (state as any).telemetryEnabled = false;
+
+			// v6→v7: Ed25519 signing keys
+			if (!state.SignPublicKey) {
+				const keys = generateSigningKeys();
+				(state as any).SignPublicKey = keys.publicKey;
+				(state as any).SignPrivateKey = keys.privateKey;
+			}
+
+			// v7→v8: email, missions, mission preferences
+			if (!state.email) (state as any).email = null;
+			if (!state.missions) (state as any).missions = [];
+			if (!state.missionPreferences) (state as any).missionPreferences = {
+				totalCompleted: 0, totalFailed: 0,
+				riskProfile: { safe: 0, low: 0, medium: 0, high: 0, extreme: 0 },
+				favoriteType: null, lastMissionAt: 0,
+			};
+
+			// v8→v9: faction, profession, talents
+			if ((state as any).factionId === undefined) (state as any).factionId = null;
+			if ((state as any).factionContribution === undefined) (state as any).factionContribution = 0;
+			if ((state as any).joinedFactionAt === undefined) (state as any).joinedFactionAt = null;
+			if ((state as any).professionId === undefined) (state as any).professionId = null;
+			if ((state as any).joinedProfessionAt === undefined) (state as any).joinedProfessionAt = null;
+			if (!Array.isArray((state as any).talents)) (state as any).talents = [];
+			if ((state as any).talentPoints === undefined) (state as any).talentPoints = 0;
 
 			state.version = STATE_VERSION;
 		}

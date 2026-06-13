@@ -1,8 +1,8 @@
 /**
  * 武功系统 - Boss 定义与战斗
  */
-import type { Element, BossDef, BattleLog, BattleResult, WuxueState } from "./wuxue-types.js";
-import { getElementMultiplier } from "./wuxue-types.js";
+import type { Element, BossDef, BattleLog, BattleResult, BattleState, TurnAction, TurnResult, DiceEvent, DiceEventType, WuxueState } from "./wuxue-types.js";
+import { getElementMultiplier, getElementBonusLabel } from "./wuxue-types.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Boss 数据
@@ -116,16 +116,16 @@ export function getBossForLevel(level: number): BossDef {
 
 export function fightBoss(state: WuxueState, weaponAttack: number, weaponElement: Element, boss: BossDef, skillLevel?: number, skillElement?: Element): BattleResult {
 	const logs: BattleLog[] = [];
-	const scaling = 1 + Math.floor(state.level / 10) * 0.15;
-	const bossHp = Math.floor(boss.baseHp * scaling);
-	const bossAtk = Math.floor(boss.baseAttack * scaling);
-	const bossDef = Math.floor(boss.baseDefense * scaling);
+	const scaling = 1 + state.level * 0.03;
+	const bossHp = Math.floor(boss.baseHp * scaling * 1.3);
+	const bossAtk = Math.floor(boss.baseAttack * scaling * 1.0);
+	const bossDef = Math.floor(boss.baseDefense * scaling * 1.1);
 
 	const sl = state.skills.filter(s => s.unlocked).reduce((sum, s) => sum + s.level, 0);
 	const skLvl = skillLevel ?? 1;
-	const playerAtk = state.level + sl * 2 + weaponAttack + 5 + (skLvl - 1) * 4 + state.attackBuff;
+	const playerAtk = state.level + Math.floor(sl * 0.8) + weaponAttack + 3 + Math.floor((skLvl - 1) * 1.5) + state.attackBuff;
 	state.attackBuff = 0;
-	const playerDef = 10 + state.level + Math.floor(sl * 0.5) + Math.floor((skLvl - 1) * 1.5) + state.defenseBuff;
+	const playerDef = 8 + state.level + Math.floor(sl * 0.3) + Math.floor((skLvl - 1) * 0.8) + state.defenseBuff;
 	state.defenseBuff = 0;
 
 	// 武功伤害倍率：武功等级越高触发越频繁，伤害 = 武功等级 * 10
@@ -144,7 +144,7 @@ export function fightBoss(state: WuxueState, weaponAttack: number, weaponElement
 				const skMul = getElementMultiplier(skillElement, boss.element);
 				const skDmg = Math.max(1, Math.floor(skillDmgBase * skMul * (0.9 + Math.random() * 0.2)));
 				bossHpCurrent -= skDmg;
-				logs.push({ turn, attacker: "player", damage: skDmg, elementBonus: skMul > 1 ? "克制" : skMul < 1 ? "被克" : "", isSkillHit: true, selfDamage: selfCost });
+				logs.push({ turn, attacker: "player", damage: skDmg, elementBonus: getElementBonusLabel(skillElement!, boss.element), isSkillHit: true, selfDamage: selfCost });
 				if (bossHpCurrent <= 0) break;
 			}
 		}
@@ -153,14 +153,14 @@ export function fightBoss(state: WuxueState, weaponAttack: number, weaponElement
 		const pm = getElementMultiplier(weaponElement, boss.element);
 		const pd = Math.max(1, Math.floor((playerAtk - bossDef * 0.4) * pm * (0.85 + Math.random() * 0.3)));
 		bossHpCurrent -= pd;
-		logs.push({ turn, attacker: "player", damage: pd, elementBonus: pm > 1 ? "克制" : pm < 1 ? "被克" : "" });
+		logs.push({ turn, attacker: "player", damage: pd, elementBonus: getElementBonusLabel(weaponElement, boss.element) });
 		if (bossHpCurrent <= 0) break;
 
 		// Boss攻击
 		const bm = getElementMultiplier(boss.element, weaponElement);
 		const bd = Math.max(1, Math.floor((bossAtk - playerDef * 0.4) * bm * (0.85 + Math.random() * 0.3)));
 		playerHp -= bd;
-		logs.push({ turn, attacker: boss.name, damage: bd, elementBonus: bm > 1 ? "克制" : bm < 1 ? "被克" : "" });
+		logs.push({ turn, attacker: boss.name, damage: bd, elementBonus: getElementBonusLabel(boss.element, weaponElement) });
 	}
 
 	// 战后扣除实际血量
@@ -175,5 +175,189 @@ export function fightBoss(state: WuxueState, weaponAttack: number, weaponElement
 	if (!won) state.hp = Math.max(1, state.hp - state.maxHp * 0.1);
 
 	return { won, playerHp: Math.max(0, Math.floor(playerHp)), bossHpLeft: Math.max(0, bossHpCurrent), bossName: boss.name, bossElement: boss.element, logs, goldReward, xpReward, skillXpReward };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 手动战斗
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** 初始化手动战斗状态 */
+export function initBattleState(
+	state: WuxueState, weaponAttack: number, weaponElement: Element,
+	boss: BossDef, skillLevel?: number, skillElement?: Element,
+): BattleState {
+	const scaling = 1 + state.level * 0.03;
+	const bossHp = Math.floor(boss.baseHp * scaling * 1.3);
+	const bossAtk = Math.floor(boss.baseAttack * scaling * 1.0);
+	const bossDef = Math.floor(boss.baseDefense * scaling * 1.1);
+	const sl = state.skills.filter(s => s.unlocked).reduce((sum, s) => sum + s.level, 0);
+	const skLvl = skillLevel ?? 1;
+	const playerAtk = state.level + Math.floor(sl * 0.8) + weaponAttack + 3 + Math.floor((skLvl - 1) * 1.5) + state.attackBuff;
+	const playerDef = 8 + state.level + Math.floor(sl * 0.3) + Math.floor((skLvl - 1) * 0.8) + state.defenseBuff;
+	const skillDmgBase = skLvl * 10;
+	const skillTriggerInterval = Math.max(2, 5 - Math.floor(skLvl / 4));
+	return {
+		playerHp: (state.hp && !isNaN(state.hp)) ? state.hp : state.maxHp || 100,
+		playerMaxHp: state.maxHp,
+		bossHp, bossMaxHp: bossHp,
+		bossName: boss.name, bossElement: boss.element,
+		turn: 0,
+		playerAtk, playerDef, bossAtk, bossDef,
+		weaponElement,
+		skillElement, skillLevel: skLvl,
+		skillDmgBase, skillTriggerInterval,
+		weaponAttack,
+		logs: [],
+	};
+}
+
+/** 执行一回合手动战斗 */
+// ═══════════════════════════════════════════════════════════════════════════
+// 🎲 骰子事件系统
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** 掷骰并产生随机事件 */
+export function rollDice(playerElement: Element, bossElement: Element): DiceEvent {
+	const roll = Math.floor(Math.random() * 6) + 1;
+	const overcomes = getElementMultiplier(playerElement, bossElement) > 1;
+	const overcomeBy = getElementMultiplier(bossElement, playerElement) > 1;
+
+	// 骰子结果映射
+	if (roll === 6) {
+		if (overcomes) return { roll, event: "元素共鸣", target: "player", desc: `🎲6！${playerElement}属性共鸣，克制加成翻倍！` };
+		return { roll, event: "暴击", target: "player", desc: `🎲6！暴击！伤害+50%！` };
+	}
+	if (roll === 5) {
+		return { roll, event: "破防", target: "boss", desc: `🎲5！破防！无视Boss 50%防御！` };
+	}
+	if (roll === 4) {
+		return { roll, event: "回春", target: "player", desc: `🎲4！回春！恢复少量血量！` };
+	}
+	if (roll === 3) {
+		if (overcomeBy) return { roll, event: "虚弱", target: "player", desc: `🎲3！${bossElement}属性压制，你感到虚弱...` };
+		return { roll, event: "普通", target: "both", desc: `🎲3。平平无奇的一击。` };
+	}
+	if (roll === 2) {
+		return { roll, event: "闪避", target: "boss", desc: `🎲2！Boss侧身闪避！` };
+	}
+	// roll === 1: Boss 暴击
+	return { roll, event: "暴击", target: "boss", desc: `🎲1！Boss暴走！Boss攻击+50%！` };
+}
+
+/** 应用骰子事件到伤害 */
+function applyDiceToDamage(dmg: number, dice: DiceEvent, isPlayerAttack: boolean): number {
+	if (isPlayerAttack) {
+		if (dice.target === "player") {
+			if (dice.event === "暴击") return Math.floor(dmg * 1.5);
+			if (dice.event === "元素共鸣") return Math.floor(dmg * 1.4);
+		}
+		if (dice.target === "boss" && dice.event === "闪避") return Math.floor(dmg * 0.3);
+	} else {
+		// Boss 攻击
+		if (dice.target === "boss" && dice.event === "暴击") return Math.floor(dmg * 1.5);
+		if (dice.target === "player" && dice.event === "虚弱") return Math.floor(dmg * 1.5);
+	}
+	return dmg;
+}
+
+export function executeBattleTurn(bs: BattleState, action: TurnAction, elementMultiplier: (a: Element, d: Element) => number): TurnResult {
+	const logs: BattleLog[] = [];
+	bs.turn++;
+
+	if (action === "flee") {
+		return { logs: [], over: false, fled: true };
+	}
+
+	// 🎲 每回合掷骰
+	const dice = rollDice(bs.weaponElement, bs.bossElement);
+
+	// 骰子回春效果：玩家回血
+	if (dice.event === "回春") {
+		const heal = Math.floor(bs.playerMaxHp * 0.08);
+		bs.playerHp = Math.min(bs.playerMaxHp, bs.playerHp + heal);
+		logs.push({ turn: bs.turn, attacker: "player", damage: 0, elementBonus: "", isSkillHit: false, selfDamage: -heal });
+	}
+
+	if (action === "defend") {
+		// 🛡️ 防御：受伤害减半，不攻击
+		logs.push({ turn: bs.turn, attacker: "player", damage: 0, elementBonus: "防御", isSkillHit: false, selfDamage: 0 });
+		// Boss 攻击（减半）
+		const bm = elementMultiplier(bs.bossElement, bs.weaponElement);
+		let bd = Math.max(1, Math.floor((bs.bossAtk - bs.playerDef * 0.6) * bm * (0.85 + Math.random() * 0.3)));
+		bd = Math.floor(bd * 0.5);  // 防御减半
+		bd = applyDiceToDamage(bd, dice, false);
+		bs.playerHp -= bd;
+		logs.push({ turn: bs.turn, attacker: bs.bossName, damage: bd, elementBonus: getElementBonusLabel(bs.bossElement, bs.weaponElement) });
+		if (bs.playerHp <= 0) { bs.logs.push(...logs); return { logs, over: true, won: false, dice }; }
+		return { logs, over: false, dice };
+	}
+
+	if (action === "item") {
+		const heal = Math.floor(bs.playerMaxHp * 0.2);
+		bs.playerHp = Math.min(bs.playerMaxHp, bs.playerHp + heal);
+		logs.push({ turn: bs.turn, attacker: "player", damage: 0, elementBonus: "", isSkillHit: false, selfDamage: -heal });
+		const bm = elementMultiplier(bs.bossElement, bs.weaponElement);
+		let bd = Math.max(1, Math.floor((bs.bossAtk - bs.playerDef * 0.4) * bm * (0.85 + Math.random() * 0.3)));
+		bd = applyDiceToDamage(bd, dice, false);
+		bs.playerHp -= bd;
+		logs.push({ turn: bs.turn, attacker: bs.bossName, damage: bd, elementBonus: getElementBonusLabel(bs.bossElement, bs.weaponElement) });
+		if (bs.playerHp <= 0) return { logs, over: true, won: false, dice };
+		return { logs, over: false, dice };
+	}
+
+	if (action === "skill" && bs.skillElement) {
+		const selfCost = Math.max(1, Math.floor(bs.skillDmgBase * 0.15));
+		if (bs.playerHp > selfCost) {
+			bs.playerHp -= selfCost;
+			const skMul = elementMultiplier(bs.skillElement, bs.bossElement);
+			const diceSkill = rollDice(bs.skillElement, bs.bossElement);  // 武功用武功元素掷骰
+			let skDmg = Math.max(1, Math.floor(bs.skillDmgBase * skMul * (0.9 + Math.random() * 0.2)));
+			skDmg = applyDiceToDamage(skDmg, diceSkill, true);
+			bs.bossHp -= skDmg;
+			logs.push({ turn: bs.turn, attacker: "player", damage: skDmg, elementBonus: getElementBonusLabel(bs.skillElement!, bs.bossElement), isSkillHit: true, selfDamage: selfCost });
+			if (bs.bossHp <= 0) { bs.logs.push(...logs); return { logs, over: true, won: true, dice: diceSkill }; }
+		}
+	} else {
+		// 普通攻击
+		const pm = elementMultiplier(bs.weaponElement, bs.bossElement);
+		const defReduction = dice.event === "破防" ? 0.5 : 1.0;  // 破防减半Boss防御
+		let pd = Math.max(1, Math.floor((bs.playerAtk - bs.bossDef * 0.4 * defReduction) * pm * (0.85 + Math.random() * 0.3)));
+		pd = applyDiceToDamage(pd, dice, true);
+		bs.bossHp -= pd;
+		logs.push({ turn: bs.turn, attacker: "player", damage: pd, elementBonus: getElementBonusLabel(bs.weaponElement, bs.bossElement) });
+		if (bs.bossHp <= 0) { bs.logs.push(...logs); return { logs, over: true, won: true, dice }; }
+	}
+
+	// Boss 攻击
+	const bm = elementMultiplier(bs.bossElement, bs.weaponElement);
+	let bd = Math.max(1, Math.floor((bs.bossAtk - bs.playerDef * 0.4) * bm * (0.85 + Math.random() * 0.3)));
+	bd = applyDiceToDamage(bd, dice, false);
+	bs.playerHp -= bd;
+	logs.push({ turn: bs.turn, attacker: bs.bossName, damage: bd, elementBonus: getElementBonusLabel(bs.bossElement, bs.weaponElement) });
+	if (bs.playerHp <= 0) { bs.logs.push(...logs); return { logs, over: true, won: false, dice }; }
+
+	if (bs.turn >= 20) { bs.logs.push(...logs); return { logs, over: true, won: false, dice }; }
+
+	bs.logs.push(...logs);
+	return { logs, over: false, dice };
+}
+
+/** 手动战斗结束后，结算奖励到 state */
+export function finalizeBattle(state: WuxueState, bs: BattleState, boss: BossDef, won: boolean, fled: boolean): BattleResult {
+	state.attackBuff = 0;
+	state.defenseBuff = 0;
+	state.hp = Math.max(0, Math.floor(bs.playerHp));
+	if (!won && !fled) state.hp = Math.max(1, state.hp - state.maxHp * 0.1);
+
+	const goldReward = won ? Math.floor(boss.baseHp * 0.3 + boss.baseAttack * 2) : 0;
+	const xpReward = won ? Math.floor(boss.baseHp * 0.5) : Math.floor(boss.baseHp * 0.1);
+	const skillXpReward = won ? Math.floor(15 + boss.baseAttack * 0.5) : Math.floor(5 + boss.baseAttack * 0.2);
+	if (won) state.gold += goldReward;
+
+	return {
+		won, playerHp: Math.max(0, Math.floor(bs.playerHp)),
+		bossHpLeft: Math.max(0, bs.bossHp), bossName: boss.name, bossElement: boss.element,
+		logs: bs.logs, goldReward, xpReward, skillXpReward,
+	};
 }
 

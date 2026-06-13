@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const tests = [
-	"pet.test.ts",
+	"xia.test.ts",
 ];
 
 async function runAll(): Promise<void> {

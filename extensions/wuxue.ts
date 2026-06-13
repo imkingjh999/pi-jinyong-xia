@@ -17,7 +17,7 @@
 
 // Re-export everything from sub-modules
 export type { Element } from "./wuxue-types.js";
-export { ELEMENT_SYMBOL, getElementMultiplier, OVERCOMES, GENERATES } from "./wuxue-types.js";
+export { ELEMENT_SYMBOL, getElementMultiplier, getElementBonusLabel, OVERCOMES, GENERATES } from "./wuxue-types.js";
 export type { WuxueState, Skill, SkillDef, WeaponDef, ItemDef, BossDef, DropResult, BattleLog, BattleResult } from "./wuxue-types.js";
 
 export { SKILL_POOL, MAX_SKILLS, EXCLUSIVE_SKILL_IDS, WEAPON_DEFS, ITEM_DEFS,
@@ -27,7 +27,17 @@ export { SKILL_POOL, MAX_SKILLS, EXCLUSIVE_SKILL_IDS, WEAPON_DEFS, ITEM_DEFS,
 
 export { getLocation, getEvent, generateEncounter } from "./wuxue-encounter.js";
 
-export { BOSS_DEFS, getBossForLevel, fightBoss } from "./wuxue-boss.js";
+export { BOSS_DEFS, getBossForLevel, fightBoss, initBattleState, executeBattleTurn, finalizeBattle, rollDice } from "./wuxue-boss.js";
+
+// 新系统
+export { FACTIONS, getFaction, getAllFactions, getFactionBonus, getFactionRankTitle, getFactionRankIndex, addContribution } from "./wuxue-faction.js";
+export type { FactionDef } from "./wuxue-faction.js";
+export { PROFESSIONS, getProfession, getAllProfessions, getProfessionBonus } from "./wuxue-profession.js";
+export type { ProfessionDef } from "./wuxue-profession.js";
+export { TALENTS, getTalent, getAllTalents, getTalentsByBranch, calculateTalentBonuses, canLearnTalent, getTalentPointsPerLevel, getBranchName, getBranchEmoji } from "./wuxue-talent.js";
+export type { TalentDef } from "./wuxue-talent.js";
+export { ACHIEVEMENT_DEFS, ACHIEVEMENT_CATEGORIES, getAchievementDef, getAllAchievementDefs, getAchievementsByCategory, getRarityLabel, getRarityColor, getRarityEmoji } from "./wuxue-achievements.js";
+export type { AchievementDef, AchievementCategory } from "./wuxue-achievements.js";
 
 import type { Element, WuxueState, Skill } from "./wuxue-types.js";
 import { getWeaponDef, getSkill, getItemDef } from "./wuxue-data.js";
@@ -135,9 +145,11 @@ export function addXp(state: WuxueState, amount: number): { leveledUp: boolean; 
 		state.xpToNext = xpForLevel(state.level);
 		leveledUp = true;
 
-		// 升级时提升最大血量并恢复满血
+		// 升级时提升最大血量并恢复部分血量（非满血）
+		const oldMaxHp = state.maxHp;
 		state.maxHp = 100 + (state.level - 1) * 10;
-		state.hp = state.maxHp;
+		// 按旧血量比例恢复，额外回复 20%
+		state.hp = Math.min(state.maxHp, Math.floor(state.hp / oldMaxHp * state.maxHp) + Math.floor(state.maxHp * 0.2));
 
 		for (const skill of state.skills) {
 			if (!skill.unlocked && (SKILL_UNLOCK_LEVEL[skill.id] ?? 999) <= state.level) {
@@ -227,6 +239,7 @@ export function recordEvent(state: WuxueState, type: "command" | "edit" | "error
 interface AchievementDef { id: string; name: string; description: string; check: (state: WuxueState) => boolean; }
 
 const ACHIEVEMENT_DEFS: AchievementDef[] = [
+	// ── 原有成就 ──
 	{ id: "first_train", name: "初入江湖", description: "第一次修炼", check: s => s.totalTrainings >= 1 },
 	{ id: "train_10", name: "勤学苦练", description: "修炼10次", check: s => s.totalTrainings >= 10 },
 	{ id: "train_50", name: "百折不挠", description: "修炼50次", check: s => s.totalTrainings >= 50 },
@@ -237,6 +250,123 @@ const ACHIEVEMENT_DEFS: AchievementDef[] = [
 	{ id: "edit_100", name: "勤修代码", description: "编辑100次", check: s => s.totalEdits >= 100 },
 	{ id: "gold_1000", name: "小有积蓄", description: "1000金币", check: s => s.gold >= 1000 },
 	{ id: "gold_10000", name: "富甲一方", description: "10000金币", check: s => s.gold >= 10000 },
+
+	// ══════════════════════════════════════════════════════════════════════
+	// 武功类 (20)
+	// ══════════════════════════════════════════════════════════════════════
+	{ id: "skill_master_5", name: "武功小成", description: "任一武功升至5级", check: s => s.skills.some(sk => sk.unlocked && sk.level >= 5) },
+	{ id: "skill_master_8", name: "武功大成", description: "任一武功升至8级", check: s => s.skills.some(sk => sk.unlocked && sk.level >= 8) },
+	{ id: "skill_master_10", name: "武功圆满", description: "任一武功升至10级满级", check: s => s.skills.some(sk => sk.unlocked && sk.level >= 10) },
+	{ id: "element_master", name: "五行精通", description: "习得全部五行属性武功", check: s => { const els = new Set(s.skills.filter(sk => sk.unlocked).map(sk => sk.element)); return ["金","木","水","火","土"].every(e => els.has(e as any)); } },
+	{ id: "dual_element", name: "双元素师", description: "掌握2种不同元素武功", check: s => new Set(s.skills.filter(sk => sk.unlocked).map(sk => sk.element)).size >= 2 },
+	{ id: "tri_element", name: "三元素师", description: "掌握3种不同元素武功", check: s => new Set(s.skills.filter(sk => sk.unlocked).map(sk => sk.element)).size >= 3 },
+	{ id: "all_elements", name: "五行归一", description: "掌握全部5种元素武功", check: s => new Set(s.skills.filter(sk => sk.unlocked).map(sk => sk.element)).size >= 5 },
+	{ id: "skill_diversity_3", name: "博采众长", description: "同时掌握3门武功", check: s => s.skills.filter(sk => sk.unlocked).length >= 3 },
+	{ id: "skill_diversity_5", name: "融会贯通", description: "同时掌握5门武功", check: s => s.skills.filter(sk => sk.unlocked).length >= 5 },
+	{ id: "skill_diversity_7", name: "万法归宗", description: "同时掌握7门武功", check: s => s.skills.filter(sk => sk.unlocked).length >= 7 },
+	{ id: "first_skill_lv5", name: "初窥堂奥", description: "首个武功达到5级", check: s => s.skills.filter(sk => sk.unlocked).some(sk => sk.level >= 5) },
+	{ id: "first_skill_lv10", name: "登峰造极", description: "首个武功达到10级", check: s => s.skills.filter(sk => sk.unlocked).some(sk => sk.level >= 10) },
+	{ id: "skill_xp_1000", name: "内力初聚", description: "武功经验累计1000", check: s => s.skills.reduce((a, sk) => a + sk.xp, 0) >= 1000 },
+	{ id: "skill_xp_5000", name: "内力浑厚", description: "武功经验累计5000", check: s => s.skills.reduce((a, sk) => a + sk.xp, 0) >= 5000 },
+	{ id: "skill_xp_10000", name: "内力如海", description: "武功经验累计10000", check: s => s.skills.reduce((a, sk) => a + sk.xp, 0) >= 10000 },
+	{ id: "max_skills_reached", name: "武功满载", description: "武功栏位已满", check: s => s.skills.filter(sk => sk.unlocked).length >= 5 },
+	{ id: "exclusive_skill", name: "独门绝学", description: "获得一门专属武功", check: s => { const excl = new Set(["douzhuan","wuxue-dianpin","liumai","lingbo","xianglong","dagou","bingxue","jiuyin","bihai","zuoyou","jiuyin-zhuazhao","anran","dugu","yirong","eymei-jianfa","qiankun","jiuyang","moulue","tanzhi","qinyin","huagu","ningbi","hujiadao","lanxin","yangjia-qiang","nizhao"]); return s.skills.some(sk => sk.unlocked && excl.has(sk.id)); } },
+	{ id: "rare_skill", name: "稀有绝技", description: "习得一门稀有武功", check: s => { const rare = new Set(["jiuyang","jiuyin","dugu","xianglong","qiankun","liumai"]); return s.skills.some(sk => sk.unlocked && rare.has(sk.id)); } },
+	{ id: "legendary_skill", name: "旷世奇功", description: "同时拥有九阳神功和九阴真经", check: s => { const ids = new Set(s.skills.filter(sk => sk.unlocked).map(sk => sk.id)); return ids.has("jiuyang") && ids.has("jiuyin"); } },
+	{ id: "total_xp_10000", name: "经验丰富", description: "累计经验达到10000", check: s => s.totalXp >= 10000 },
+	{ id: "total_xp_100000", name: "经验大师", description: "累计经验达到100000", check: s => s.totalXp >= 100000 },
+
+	// ══════════════════════════════════════════════════════════════════════
+	// 战斗类 (15)
+	// ══════════════════════════════════════════════════════════════════════
+	{ id: "boss_10_wins", name: "十战十胜", description: "击败10个Boss", check: s => (s as any).bossesDefeated >= 10 },
+	{ id: "boss_25_wins", name: "百战之师", description: "击败25个Boss", check: s => (s as any).bossesDefeated >= 25 },
+	{ id: "boss_50_wins", name: "战无不胜", description: "击败50个Boss", check: s => (s as any).bossesDefeated >= 50 },
+	{ id: "boss_100_wins", name: "天下无敌", description: "击败100个Boss", check: s => (s as any).bossesDefeated >= 100 },
+	{ id: "boss_streak_3", name: "三连胜", description: "连续击败3个Boss", check: s => (s as any).bossStreak >= 3 },
+	{ id: "boss_streak_5", name: "五连胜", description: "连续击败5个Boss", check: s => (s as any).bossStreak >= 5 },
+	{ id: "boss_streak_10", name: "十连胜", description: "连续击败10个Boss", check: s => (s as any).bossStreak >= 10 },
+	{ id: "boss_perfect", name: "毫发无损", description: "满血击败Boss", check: s => !!(s as any).bossPerfectWin },
+	{ id: "boss_low_hp_win", name: "绝地反击", description: "血量低于10%时击败Boss", check: s => !!(s as any).bossLowHpWin },
+	{ id: "boss_underdog", name: "以弱胜强", description: "击败高于自身等级的Boss", check: s => !!(s as any).bossUnderdogWin },
+	{ id: "boss_element_counter", name: "五行克制", description: "以克制属性击败Boss", check: s => !!(s as any).bossElementCounterWin },
+	{ id: "boss_one_shot", name: "一击必杀", description: "一回合击败Boss", check: s => !!(s as any).bossOneShotWin },
+	{ id: "survived_boss", name: "死里逃生", description: "Boss战失败后幸存", check: s => !!(s as any).bossSurvived },
+	{ id: "boss_all_types", name: "全能斗士", description: "击败所有种类Boss", check: s => !!(s as any).bossAllTypesDefeated },
+	{ id: "boss_legendary", name: "传说猎手", description: "击败传说级Boss", check: s => !!(s as any).bossLegendaryDefeated },
+
+	// ══════════════════════════════════════════════════════════════════════
+	// 财富类 (15)
+	// ══════════════════════════════════════════════════════════════════════
+	{ id: "gold_100", name: "初识金银", description: "持有100金币", check: s => s.gold >= 100 },
+	{ id: "gold_500", name: "小有所获", description: "持有500金币", check: s => s.gold >= 500 },
+	{ id: "gold_5000", name: "腰缠万贯", description: "持有5000金币", check: s => s.gold >= 5000 },
+	{ id: "gold_50000", name: "富可敌国", description: "持有50000金币", check: s => s.gold >= 50000 },
+	{ id: "gold_100000", name: "财神转世", description: "持有100000金币", check: s => s.gold >= 100000 },
+	{ id: "first_purchase", name: "初次消费", description: "第一次在商店购买", check: s => !!(s as any).totalPurchases },
+	{ id: "shop_10_buys", name: "常客光临", description: "商店购买10次", check: s => ((s as any).totalPurchases ?? 0) >= 10 },
+	{ id: "shop_50_buys", name: "购物达人", description: "商店购买50次", check: s => ((s as any).totalPurchases ?? 0) >= 50 },
+	{ id: "shop_100_buys", name: "挥金如土", description: "商店购买100次", check: s => ((s as any).totalPurchases ?? 0) >= 100 },
+	{ id: "sell_weapon", name: "弃旧迎新", description: "出售过一把武器", check: s => !!(s as any).weaponsSold },
+	{ id: "go_bankrupt", name: "一贫如洗", description: "金币归零", check: s => s.gold <= 0 && s.totalTrainings > 0 },
+	{ id: "gold_from_boss", name: "战利品", description: "从Boss战获得金币", check: s => !!(s as any).goldFromBoss },
+	{ id: "gold_from_encounter", name: "意外之财", description: "从奇遇获得金币", check: s => !!(s as any).goldFromEncounter },
+	{ id: "generous", name: "一掷千金", description: "累计消费10000金币以上", check: s => ((s as any).totalGoldSpent ?? 0) >= 10000 },
+	{ id: "gold_earned_total", name: "日进斗金", description: "累计获得50000金币", check: s => ((s as any).totalGoldEarned ?? 0) >= 50000 },
+
+	// ══════════════════════════════════════════════════════════════════════
+	// 江湖类 (15)
+	// ══════════════════════════════════════════════════════════════════════
+	{ id: "level_5", name: "初出茅庐", description: "达到5级", check: s => s.level >= 5 },
+	{ id: "level_20", name: "小有所成", description: "达到20级", check: s => s.level >= 20 },
+	{ id: "level_40", name: "身手不凡", description: "达到40级", check: s => s.level >= 40 },
+	{ id: "level_60", name: "威震武林", description: "达到60级", check: s => s.level >= 60 },
+	{ id: "level_80", name: "登峰造极", description: "达到80级", check: s => s.level >= 80 },
+	{ id: "first_encounter", name: "江湖初遇", description: "第一次触发奇遇", check: s => !!(s as any).totalEncounters },
+	{ id: "encounter_50", name: "见多识广", description: "触发50次奇遇", check: s => ((s as any).totalEncounters ?? 0) >= 50 },
+	{ id: "encounter_100", name: "阅历丰富", description: "触发100次奇遇", check: s => ((s as any).totalEncounters ?? 0) >= 100 },
+	{ id: "encounter_500", name: "阅尽千帆", description: "触发500次奇遇", check: s => ((s as any).totalEncounters ?? 0) >= 500 },
+	{ id: "lucky_encounter", name: "福星高照", description: "触发稀有奇遇", check: s => !!(s as any).luckyEncounter },
+	{ id: "unlucky_encounter", name: "霉运当头", description: "奇遇中丢失金币", check: s => !!(s as any).unluckyEncounter },
+	{ id: "wanderer", name: "浪迹天涯", description: "到访所有地点", check: s => !!(s as any).allLocationsVisited },
+	{ id: "veteran", name: "老江湖", description: "游戏超过100个回合", check: s => s.totalTrainings + s.totalCommands + s.totalEdits >= 100 },
+	{ id: "command_500", name: "勤勉修行", description: "执行500次命令", check: s => s.totalCommands >= 500 },
+	{ id: "edit_1000", name: "代码大师", description: "编辑1000次", check: s => s.totalEdits >= 1000 },
+
+	// ══════════════════════════════════════════════════════════════════════
+	// 任务类 (15)
+	// ══════════════════════════════════════════════════════════════════════
+	{ id: "first_mission", name: "初领使命", description: "完成第一个任务", check: s => !!(s as any).missionsCompleted },
+	{ id: "mission_10", name: "身经百战", description: "完成10个任务", check: s => ((s as any).missionsCompleted ?? 0) >= 10 },
+	{ id: "mission_25", name: "使命必达", description: "完成25个任务", check: s => ((s as any).missionsCompleted ?? 0) >= 25 },
+	{ id: "mission_50", name: "功勋卓著", description: "完成50个任务", check: s => ((s as any).missionsCompleted ?? 0) >= 50 },
+	{ id: "mission_100", name: "一代传奇", description: "完成100个任务", check: s => ((s as any).missionsCompleted ?? 0) >= 100 },
+	{ id: "mission_all_types", name: "全能行者", description: "完成所有类型任务", check: s => !!(s as any).allMissionTypesCompleted },
+	{ id: "mission_perfect_success", name: "十全十美", description: "完美完成任务", check: s => !!(s as any).missionPerfectSuccess },
+	{ id: "mission_failed", name: "功亏一篑", description: "任务失败一次", check: s => !!(s as any).missionFailedOnce },
+	{ id: "mission_high_risk", name: "虎口拔牙", description: "完成高风险任务", check: s => !!(s as any).highRiskMissionCompleted },
+	{ id: "mission_extreme_risk", name: "刀尖起舞", description: "完成极高风险任务", check: s => !!(s as any).extremeRiskMissionCompleted },
+	{ id: "mission_planned", name: "运筹帷幄", description: "使用计划完成任务", check: s => !!(s as any).missionWithPlan },
+	{ id: "mbti_analyzed", name: "知己知彼", description: "完成MBTI性格分析", check: s => !!(s as any).mbtiAnalyzed },
+	{ id: "profile_completed", name: "江湖名帖", description: "完成个人档案", check: s => !!(s as any).profileCompleted },
+	{ id: "mission_streak_3", name: "三连捷报", description: "连续完成3个任务", check: s => ((s as any).missionStreak ?? 0) >= 3 },
+	{ id: "mission_streak_5", name: "五连捷报", description: "连续完成5个任务", check: s => ((s as any).missionStreak ?? 0) >= 5 },
+
+	// ══════════════════════════════════════════════════════════════════════
+	// 道具/装备类 (12)
+	// ══════════════════════════════════════════════════════════════════════
+	{ id: "first_weapon", name: "初获利器", description: "获得第一把武器", check: s => Object.keys(s.items).some(k => k.startsWith("weapon_")) },
+	{ id: "weapon_rare", name: "良品在手", description: "获得良品武器", check: s => !!(s as any).rareWeaponObtained },
+	{ id: "weapon_epic", name: "精品利器", description: "获得精品武器", check: s => !!(s as any).epicWeaponObtained },
+	{ id: "weapon_legendary", name: "神器降临", description: "获得极品或神器武器", check: s => !!(s as any).legendaryWeaponObtained },
+	{ id: "weapon_all_elements", name: "五行利器", description: "收集全部五行属性武器", check: s => !!(s as any).allElementWeapons },
+	{ id: "first_item", name: "初次拾取", description: "获得第一个道具", check: s => Object.keys(s.items).length > 0 },
+	{ id: "item_50_used", name: "道具达人", description: "使用50个道具", check: s => ((s as any).totalItemsUsed ?? 0) >= 50 },
+	{ id: "owned_weapons_10", name: "兵甲入库", description: "拥有10把武器", check: s => ((s as any).totalWeaponsOwned ?? 0) >= 10 },
+	{ id: "owned_weapons_20", name: "兵器库满", description: "拥有20把武器", check: s => ((s as any).totalWeaponsOwned ?? 0) >= 20 },
+	{ id: "hp_full_restore", name: "妙手回春", description: "使用道具满血回复", check: s => !!(s as any).hpFullRestore },
+	{ id: "all_items_collected", name: "收藏大家", description: "收集所有种类道具", check: s => !!(s as any).allItemsCollected },
+	{ id: "train_100", name: "铁杵磨针", description: "修炼100次", check: s => s.totalTrainings >= 100 },
 ];
 
 export function checkAchievements(state: WuxueState): string[] {

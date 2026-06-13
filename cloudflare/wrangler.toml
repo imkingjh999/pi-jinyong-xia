@@ -1,0 +1,23 @@
+name = "xia-leaderboard"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "xia-leaderboard-db"
+database_id = "19eff587-ed92-4f69-bede-79d9d74aecde"
+
+# R2 Bucket for achievement badge images
+[[r2_buckets]]
+binding = "BADGES"
+bucket_name = "xia-achievement-badges"
+
+# R2 Bucket for character avatar images
+[[r2_buckets]]
+binding = "AVATARS"
+bucket_name = "xia-avatars"
+
+[[routes]]
+pattern = "xia.openclawd.qzz.io"
+custom_domain = true
