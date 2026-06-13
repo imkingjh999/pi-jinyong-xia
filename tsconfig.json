@@ -13,6 +13,6 @@
     "sourceMap": true,
     "resolveJsonModule": true
   },
-  "include": ["extensions/index.ts", "extensions/pet.ts", "extensions/wuxue.ts", "extensions/characters.ts", "extensions/state.ts", "extensions/animation-engine.ts", "extensions/animation-player.ts", "extensions/video-player.ts", "tests/**/*.ts"],
+  "include": ["extensions/index.ts", "extensions/xia.ts", "extensions/xia-render.ts", "extensions/xia-select.ts", "extensions/xia-commands.ts", "extensions/xia-cmd-stats.ts", "extensions/xia-cmd-missions.ts", "extensions/xia-cmd-shop-rank.ts", "extensions/xia-cmd-faction.ts", "extensions/xia-events.ts", "extensions/xia-boss.ts", "extensions/missions.ts", "extensions/missions-templates.ts", "extensions/missions-templates-safe.ts", "extensions/missions-templates-danger.ts", "extensions/missions-mbti.ts", "extensions/wuxue.ts", "extensions/wuxue-types.ts", "extensions/wuxue-data.ts", "extensions/wuxue-encounter.ts", "extensions/wuxue-boss.ts", "extensions/wuxue-faction.ts", "extensions/wuxue-profession.ts", "extensions/wuxue-talent.ts", "extensions/wuxue-achievements.ts", "extensions/characters.ts", "extensions/state.ts", "extensions/telemetry.ts", "tests/xia.test.ts", "tests/helpers.ts", "tests/run-all.ts"],
   "exclude": ["node_modules", "dist"]
 }

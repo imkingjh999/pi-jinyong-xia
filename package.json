@@ -1,23 +1,31 @@
 {
   "name": "pi-jinyong-xia",
-  "version": "1.0.0",
-  "description": "金庸武侠宠物 - 根据你的MBTI匹配金庸主角，修炼武功，陪伴编程",
+  "version": "1.0.7",
+  "description": "金庸武侠终端宠物 — 25位金庸角色、32门五行武功、50个Boss、227个江湖地点、10大门派、8种职业、24天赋、56成就、100任务、MBTI性格推导、排行榜",
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "pi-extension",
+    "pi-skill",
+    "wuxia",
+    "jinyong",
+    "pet",
+    "game",
+    "terminal",
+    "rpg"
   ],
   "type": "module",
-  "main": "reload-entry.js",
+  "main": "entry.js",
   "files": [
-    "dist",
-    "extensions",
+    "dist/extensions",
+    "dist/assets",
+    "entry.js",
     "skills",
-    "reload-entry.js",
     "LICENSE",
     "README.md"
   ],
   "pi": {
     "extensions": [
-      "./reload-entry.js"
+      "./entry.js"
     ],
     "skills": [
       "./skills"
@@ -28,15 +36,24 @@
     "test": "npx tsx tests/run-all.ts",
     "prepublishOnly": "npm run build"
   },
-  "author": "",
+  "author": "Victor Software House",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/imkingjh999/pi-jinyong-xia.git"
+  },
+  "homepage": "https://github.com/imkingjh999/pi-jinyong-xia#readme",
+  "bugs": {
+    "url": "https://github.com/imkingjh999/pi-jinyong-xia/issues"
+  },
   "license": "MIT",
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.75.3",
     "@earendil-works/pi-coding-agent": "^0.75.3",
-    "@earendil-works/pi-tui": "^0.75.3",
-    "sharp": "^0.34.5"
+    "@earendil-works/pi-tui": "^0.75.3"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.75.3",
+    "@esbuild/darwin-arm64": "^0.28.0",
+    "sharp": "^0.34.5",
     "@types/node": "^25.9.1",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"

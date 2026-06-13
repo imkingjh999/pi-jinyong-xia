@@ -2,7 +2,7 @@
  * Pi 金庸武侠宠物 - Extension Entry Point
  *
  * 用动态 import + 时间戳破缓存，支持 /reload 热更新。
- * pet.ts 中的子模块依赖也通过动态 import 加载，
+ * xia.ts 中的子模块依赖也通过动态 import 加载，
  * 这样 index.ts 的 cache-bust 能传递到整条依赖链。
  */
 import { pathToFileURL } from "node:url";
@@ -17,8 +17,6 @@ function bust(rel: string): string {
 }
 
 export default function (pi: any) {
-	// pet.js 及其依赖都用 cache-bust URL 动态导入
-	// pet.js 内部的子模块也是动态 import，所以 cache-bust 能传播
-	const url = bust("pet.js");
+	const url = bust("xia.js");
 	return import(url).then((mod: any) => mod.default(pi));
 }

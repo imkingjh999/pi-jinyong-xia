@@ -1,0 +1,12 @@
+# Source files (dist is included via files[] in package.json)
+extensions/
+tests/
+src/
+cloudflare/
+node_modules/
+
+# Junk files
+.DS_Store
+*.tsbuildinfo
+dist/test-sync.txt
+dist/tests/
