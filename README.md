@@ -15,32 +15,21 @@
 
 ## 📸 界面预览
 
-<table>
-  <tr>
-    <td align="center"><b>🎮 主菜单</b></td>
-    <td align="center"><b>📊 状态面板</b></td>
-  </tr>
-  <tr>
-    <td><img src="https://raw.githubusercontent.com/imkingjh999/pi-jinyong-xia/main/docs/menu.png" alt="主菜单" width="400"/></td>
-    <td><img src="https://raw.githubusercontent.com/imkingjh999/pi-jinyong-xia/main/docs/stats.png" alt="状态面板" width="400"/></td>
-  </tr>
-  <tr>
-    <td align="center">交互式菜单，15 大功能一键直达</td>
-    <td align="center">角色属性、武功、装备一目了然</td>
-  </tr>
-  <tr>
-    <td align="center"><b>🎭 侠客图鉴</b></td>
-    <td align="center"><b>⚔️ Boss 对战</b></td>
-  </tr>
-  <tr>
-    <td><img src="https://raw.githubusercontent.com/imkingjh999/pi-jinyong-xia/main/docs/hero.png" alt="侠客说明" width="400"/></td>
-    <td><img src="https://raw.githubusercontent.com/imkingjh999/pi-jinyong-xia/main/docs/battle.png" alt="对战" width="400"/></td>
-  </tr>
-  <tr>
-    <td align="center">Q 版头像 + 角色背景故事</td>
-    <td align="center">骰子驱动的回合制战斗系统</td>
-  </tr>
-</table>
+**🎮 主菜单 — 交互式菜单，15 大功能一键直达**
+
+![主菜单](https://raw.githubusercontent.com/imkingjh999/pi-jinyong-xia/main/docs/menu.png)
+
+**📊 状态面板 — 角色属性、武功、装备一目了然**
+
+![状态面板](https://raw.githubusercontent.com/imkingjh999/pi-jinyong-xia/main/docs/stats.png)
+
+**🎭 侠客图鉴 — Q 版头像 + 角色背景故事**
+
+![侠客说明](https://raw.githubusercontent.com/imkingjh999/pi-jinyong-xia/main/docs/hero.png)
+
+**⚔️ Boss 对战 — 骰子驱动的回合制战斗系统**
+
+![对战](https://raw.githubusercontent.com/imkingjh999/pi-jinyong-xia/main/docs/battle.png)
 
 ---
 
