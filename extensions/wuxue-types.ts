@@ -57,6 +57,7 @@ export interface WuxueState {
 	attackBuff: number;
 	defenseBuff: number;
 	xpBonus: number;
+	bossesDefeated: number;   // 累计击败 Boss 次数（用于成就 + 遥测上报）
 }
 
 export interface Skill {
