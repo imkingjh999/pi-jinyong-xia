@@ -45,6 +45,14 @@ async function loadModules() {
 export default async function (pi: ExtensionAPI) {
 	await loadModules();
 
+	// 热重载安全：递增全局 generation，旧实例的 handler 会检测到过期并退出。
+	// （pi.on 返回 void、无 pi.off、ExtensionFactory 不支持返回 disposer，
+	//  /reload 会在同一个 pi 上叠加注册 handler；用 generation guard 使旧 handler 失活。）
+	const g = globalThis as any;
+	g.__xia_gen__ = (g.__xia_gen__ ?? 0) + 1;
+	const myGen = g.__xia_gen__;
+	const alive = () => (globalThis as any).__xia_gen__ === myGen;
+
 	const { loadDeps, loadSubModules, setPetState, setRenderDeps, setSelectDeps,
 		pagedSelect, wrapSelect, runSubCommand,
 		showLines, scheduleSave, updateWidget,
@@ -67,34 +75,42 @@ export default async function (pi: ExtensionAPI) {
 	setSelectDeps(_wuxue, petState);
 
 	pi.on("session_start", async (event: any, ctx: any) => {
+		if (!alive()) return;
 		onSessionStart(event, ctx, doBossFight);
 	});
 
 	pi.on("session_shutdown", async () => {
+		if (!alive()) return;
 		onSessionShutdown();
 	});
 
 	pi.on("message_end", async (event: any, ctx: any) => {
+		if (!alive()) return;
 		onMessageEnd(event, ctx);
 	});
 
 	pi.on("turn_start", async (event: any, ctx: any) => {
+		if (!alive()) return;
 		onTurnStart(event, ctx);
 	});
 
 	pi.on("turn_end", async (event: any, ctx: any) => {
+		if (!alive()) return;
 		onTurnEnd(event, ctx, doBossFight);
 	});
 
 	pi.on("tool_execution_start", async (event: any, ctx: any) => {
+		if (!alive()) return;
 		onToolExecutionStart(event, ctx);
 	});
 
 	pi.on("tool_execution_end", async (event: any, ctx: any) => {
+		if (!alive()) return;
 		onToolExecutionEnd(event, ctx, doBossFight);
 	});
 
 	pi.on("tool_result", async (event: any, ctx: any) => {
+		if (!alive()) return;
 		onToolResult(event, ctx, doBossFight);
 	});
 
@@ -167,6 +183,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async () => {
+		if (!alive()) return;
 		const { _state, petState } = getState();
 		_state.saveState(petState);
 	});

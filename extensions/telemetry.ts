@@ -129,7 +129,7 @@ export function buildTelemetryPayload(
 		martialSkills: JSON.stringify(state.martialSkills),
 		weapon: state.weapon,
 		achievements: JSON.stringify(state.wuxue.achievements),
-		bossesDefeated: state.wuxue.achievements?.length ?? 0,
+		bossesDefeated: state.wuxue.bossesDefeated ?? 0,
 		createdAt: state.createdAt,
 		lastActiveAt: state.lastActiveAt,
 		reportedAt: Date.now(),
@@ -157,16 +157,25 @@ export function buildTelemetryPayload(
 	}
 
 	// Sign: Ed25519(payload fields except signature)
+	payload.signature = signActionPayload(payload as unknown as Record<string, unknown>, state.SignPrivateKey);
+
+	return payload;
+}
+
+/**
+ * 用 Ed25519 私钥签名任意 payload（与 Worker 的 verifySignature 对齐）。
+ * 签名内容 = JSON.stringify({ ...payload, signature: "" })。
+ * 返回 base64 签名。
+ */
+export function signActionPayload(payload: Record<string, unknown>, privateKeyBase64: string): string {
 	const dataToSign = JSON.stringify({ ...payload, signature: "" });
 	const privateKey = createPrivateKey({
-		key: Buffer.from(state.SignPrivateKey, "base64"),
+		key: Buffer.from(privateKeyBase64, "base64"),
 		format: "der",
 		type: "pkcs8",
 	});
 	const sig = cryptoSign(null, Buffer.from(dataToSign), privateKey);
-	payload.signature = sig.toString("base64");
-
-	return payload;
+	return sig.toString("base64");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -342,6 +351,8 @@ export interface ServerBossFightResult {
 
 /**
  * 服务端生成遭遇 — 客户端不再本地生成
+ * signPublicKey / signPrivateKey：Ed25519 签名凭据（来自 PetState），用于服务端验签 + 权威等级。
+ * 缺失时发送未签名请求（服务端对已注册用户会拒绝，触发本地降级）。
  */
 export async function serverEncounter(
 	userId: string,
@@ -349,12 +360,19 @@ export async function serverEncounter(
 	weaponAtk: number,
 	currentHp: number,
 	maxHp: number,
+	signPublicKey?: string | null,
+	signPrivateKey?: string | null,
 ): Promise<ServerEncounterResult | null> {
 	try {
+		const body: Record<string, unknown> = { userId, level, weaponAtk, currentHp, maxHp };
+		if (signPublicKey && signPrivateKey) {
+			body.publicKey = signPublicKey;
+			body.signature = signActionPayload(body, signPrivateKey);
+		}
 		const response = await fetch(`${WORKER_URL}/api/encounter`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ userId, level, weaponAtk, currentHp, maxHp }),
+			body: JSON.stringify(body),
 			signal: AbortSignal.timeout(15_000),
 		});
 		const data = await response.json() as ServerEncounterResult;
@@ -367,6 +385,8 @@ export async function serverEncounter(
 
 /**
  * 服务端 Boss 战斗 — 客户端不再本地计算
+ * signPublicKey / signPrivateKey：Ed25519 签名凭据（来自 PetState），用于服务端验签 + 权威等级。
+ * 缺失时发送未签名请求（服务端对已注册用户会拒绝，触发本地降级）。
  */
 export async function serverBossFight(
 	userId: string,
@@ -376,12 +396,19 @@ export async function serverBossFight(
 	skillLevel: number,
 	skillElement: string | undefined,
 	bossId: string,
+	signPublicKey?: string | null,
+	signPrivateKey?: string | null,
 ): Promise<ServerBossFightResult | null> {
 	try {
+		const body: Record<string, unknown> = { userId, level, weaponAtk, weaponElement, skillLevel, skillElement: skillElement || "", bossId };
+		if (signPublicKey && signPrivateKey) {
+			body.publicKey = signPublicKey;
+			body.signature = signActionPayload(body, signPrivateKey);
+		}
 		const response = await fetch(`${WORKER_URL}/api/boss-fight`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ userId, level, weaponAtk, weaponElement, skillLevel, skillElement: skillElement || "", bossId }),
+			body: JSON.stringify(body),
 			signal: AbortSignal.timeout(15_000),
 		});
 		const data = await response.json() as ServerBossFightResult;

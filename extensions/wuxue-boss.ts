@@ -170,7 +170,7 @@ export function fightBoss(state: WuxueState, weaponAttack: number, weaponElement
 	const goldReward = won ? Math.floor(boss.baseHp * 0.3 + boss.baseAttack * 2) : 0;
 	const xpReward = won ? Math.floor(boss.baseHp * 0.5) : Math.floor(boss.baseHp * 0.1);
 	const skillXpReward = won ? Math.floor(15 + boss.baseAttack * 0.5) : Math.floor(5 + boss.baseAttack * 0.2);
-	if (won) { state.gold += goldReward; }
+	if (won) { state.gold += goldReward; state.bossesDefeated = (state.bossesDefeated ?? 0) + 1; }
 	// 战败额外扣血
 	if (!won) state.hp = Math.max(1, state.hp - state.maxHp * 0.1);
 
@@ -352,7 +352,7 @@ export function finalizeBattle(state: WuxueState, bs: BattleState, boss: BossDef
 	const goldReward = won ? Math.floor(boss.baseHp * 0.3 + boss.baseAttack * 2) : 0;
 	const xpReward = won ? Math.floor(boss.baseHp * 0.5) : Math.floor(boss.baseHp * 0.1);
 	const skillXpReward = won ? Math.floor(15 + boss.baseAttack * 0.5) : Math.floor(5 + boss.baseAttack * 0.2);
-	if (won) state.gold += goldReward;
+	if (won) { state.gold += goldReward; state.bossesDefeated = (state.bossesDefeated ?? 0) + 1; }
 
 	return {
 		won, playerHp: Math.max(0, Math.floor(bs.playerHp)),

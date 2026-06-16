@@ -369,7 +369,7 @@ export async function handleDrop(ctx: any) {
 	try {
 		const { serverEncounter } = await import(bust("./telemetry.js"));
 		const userId = _state.getStateHash ? _state.getStateHash(petState) : "local";
-		const serverResult = await serverEncounter(userId, petState.wuxue.level, getEquippedWeaponAtk(), petState.wuxue.hp, petState.wuxue.maxHp);
+		const serverResult = await serverEncounter(userId, petState.wuxue.level, getEquippedWeaponAtk(), petState.wuxue.hp, petState.wuxue.maxHp, petState.SignPublicKey, petState.SignPrivateKey);
 		if (serverResult) {
 			drop = serverResult;
 		}
@@ -465,7 +465,7 @@ export async function ensureCharacter(ctx: any): Promise<boolean> {
 	return !!petState.characterId;
 }
 
-export async function onSessionStart(_event: any, ctx: any, doBossFight: Function) {
+export function onSessionStart(_event: any, ctx: any, doBossFight: Function) {
 	if (!ctx.hasUI) return;
 	flushNotifications(ctx);
 	try {
@@ -475,7 +475,10 @@ export async function onSessionStart(_event: any, ctx: any, doBossFight: Functio
 		if (petState.wuxue.hp <= 0) petState.wuxue.hp = petState.wuxue.maxHp;
 		_wuxue.tick(petState.wuxue);
 		updateWidget(ctx);
+		// 幂等 + 跨重载安全：定时器引用存 globalThis，避免 /reload 后旧模块实例的 interval 泄漏
+		clearUpdateTimer();
 		updateTimer = setInterval(() => { _wuxue.tick(petState.wuxue); updateWidget(ctx); scheduleSave(); }, 60000);
+		(globalThis as any).__xia_update_timer__ = updateTimer;
 	} catch (err: any) {
 		if (!/stale/i.test(err?.message)) throw err;
 	}
@@ -483,9 +486,16 @@ export async function onSessionStart(_event: any, ctx: any, doBossFight: Functio
 
 
 export async function onSessionShutdown() {
-	if (updateTimer) clearInterval(updateTimer);
-	if (saveTimer) clearTimeout(saveTimer);
+	clearUpdateTimer();
+	if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
 	_state.saveState(petState);
+}
+
+/** 清理 update 定时器（同时清理 globalThis 上可能存在的旧实例定时器，防 /reload 泄漏） */
+function clearUpdateTimer() {
+	if (updateTimer) { clearInterval(updateTimer); updateTimer = null; }
+	const g = globalThis as any;
+	if (g.__xia_update_timer__) { clearInterval(g.__xia_update_timer__); g.__xia_update_timer__ = null; }
 }
 
 export async function onMessageEnd(event: any, ctx: any) {

@@ -90,6 +90,7 @@ export async function doBossFight(
 				userId, w.level, weaponAttack, weaponElement,
 				bestSk?.level ?? 1, bestSk ? wx.getSkill(bestSk.id)?.element : undefined,
 				boss.id,
+				petState.SignPublicKey, petState.SignPrivateKey,
 			);
 		} catch { /* fallback */ }
 		if (serverResult) {
@@ -107,7 +108,7 @@ export async function doBossFight(
 				),
 			};
 			w.hp = Math.max(1, w.hp + (serverResult.hpChange || 0));
-			if (result.won) wx.addXp(w, result.xpReward);
+			if (result.won) { w.gold += result.goldReward; w.bossesDefeated = (w.bossesDefeated ?? 0) + 1; wx.addXp(w, result.xpReward); }
 		} else {
 			result = wx.fightBoss(w, weaponAttack, weaponElement, boss, bestSk?.level ?? 1, bestSk ? wx.getSkill(bestSk.id)?.element : undefined);
 			if (result.won) wx.addXp(w, result.xpReward);

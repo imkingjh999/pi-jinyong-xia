@@ -23,7 +23,7 @@ CREATE TABLE players (
   reported_at   INTEGER NOT NULL,       -- last upload timestamp (ms)
   version       TEXT NOT NULL DEFAULT '1.0.0',
   -- anti-abuse
-  ip_hash       TEXT,                   -- SHA256 of client IP (no raw IP stored)
+  ip_hash       TEXT,                   -- SHA-256 hash of client IP (salted, no raw IP stored)
   report_count  INTEGER NOT NULL DEFAULT 0,
   flagged       INTEGER NOT NULL DEFAULT 0,  -- 0=normal, 1=suspicious, 2=banned
   -- Ed25519 non-repudiation
@@ -31,7 +31,12 @@ CREATE TABLE players (
   -- User profile
   user_email       TEXT,
   mbti_type     TEXT,                       -- e.g. "INTJ"
-  mbti_scores   TEXT                        -- JSON: {E:0,I:3,S:2,...}
+  mbti_scores   TEXT,                       -- JSON: {E:0,I:3,S:2,...}
+  -- 门派 / 职业 / 天赋 (P3-5: 持久化客户端已签名的字段)
+  faction_id        TEXT,
+  profession_id     TEXT,
+  talents           TEXT,                     -- JSON: string[]
+  talent_points     INTEGER NOT NULL DEFAULT 0
 );
 
 -- Indexes for leaderboard queries

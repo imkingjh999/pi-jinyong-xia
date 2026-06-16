@@ -24,6 +24,7 @@ interface Env {
 	DB: D1Database;
 	BADGES: R2Bucket;
 	AVATARS: R2Bucket;
+	IP_HASH_SALT?: string;  // 可选：IP 哈希加盐（Worker secret），防止彩虹表反查
 }
 
 interface UploadPayload {
@@ -52,6 +53,11 @@ interface UploadPayload {
 	email?: string;
 	mbtiType?: string;
 	mbtiScores?: string;
+	// 门派 / 职业 / 天赋（客户端已签名上传，P3-5 持久化）
+	factionId?: string | null;
+	professionId?: string | null;
+	talents?: string;
+	talentPoints?: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -82,15 +88,13 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
 	});
 }
 
-function hashIp(ip: string): string {
-	let hash = 0;
-	for (let i = 0; i < ip.length; i++) {
-		const char = ip.charCodeAt(i);
-		hash = ((hash << 5) - hash) + char;
-		hash |= 0;
-	}
-	return Math.abs(hash).toString(16).padStart(8, '0') +
-		((hash * 31) & 0xFFFFFFFF).toString(16).padStart(8, '0');
+/** SHA-256(salt + ip) 取前 16 个十六进制字符（64 位）—— 用于限流分桶与反滥用统计，不可逆推原始 IP */
+async function hashIp(ip: string, salt: string = ""): Promise<string> {
+	const data = new TextEncoder().encode(salt + ip);
+	const hashBuf = await crypto.subtle.digest("SHA-256", data);
+	const hashHex = Array.from(new Uint8Array(hashBuf))
+		.map(b => b.toString(16).padStart(2, '0')).join('');
+	return hashHex.substring(0, 16);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -105,7 +109,7 @@ async function importPublicKey(derBase64: string): Promise<CryptoKey> {
 	return await crypto.subtle.importKey(
 		"spki",
 		derBytes,
-		{ name: "Ed25519", namedCurve: "Ed25519" } as EcKeyImportParams,
+		{ name: "Ed25519" },
 		false,
 		["verify"],
 	);
@@ -124,7 +128,7 @@ async function verifySignature(
 		const key = await importPublicKey(publicKeyDer);
 		const sigBytes = Uint8Array.from(atob(signatureBase64), c => c.charCodeAt(0));
 		return await crypto.subtle.verify(
-			{ name: "Ed25519" } as EcdsaParams,
+			{ name: "Ed25519" },
 			key,
 			sigBytes,
 			data,
@@ -138,8 +142,9 @@ async function verifySignature(
 /**
  * Build the signed data from the payload (same as client: JSON with signature="").
  * The client signs { ...payload, signature: "" }, so we reconstruct that.
+ * Works for any payload shape (upload, encounter, boss-fight).
  */
-function buildSignedData(payload: UploadPayload): Uint8Array {
+function buildSignedData(payload: Record<string, unknown>): Uint8Array {
 	const signed: Record<string, unknown> = { ...payload, signature: "" };
 	return new TextEncoder().encode(JSON.stringify(signed));
 }
@@ -177,6 +182,32 @@ async function checkActionRateLimit(db: D1Database, userId: string, actionType: 
 		if (elapsed < minIntervalSec) {
 			return { ok: false, reason: `操作过于频繁，请等待 ${Math.ceil(minIntervalSec - elapsed)} 秒` };
 		}
+	}
+	return { ok: true };
+}
+
+/**
+ * Per-IP global rate limit using the rate_limit table (defense against multi-account farming).
+ * Counts all action types within the window for the given IP hash. Uses CREATE TABLE IF NOT EXISTS
+ * schema, so it degrades gracefully (try/catch → allow) if the table is missing.
+ * Also opportunistically cleans up old entries to bound table growth.
+ */
+async function checkIpRateLimit(db: D1Database, ipHash: string, windowSec: number, maxCount: number): Promise<{ ok: boolean; reason?: string }> {
+	const now = Date.now();
+	const since = now - windowSec * 1000;
+	const bucket = "ip:" + ipHash;
+	try {
+		// Opportunistic cleanup of stale entries (cheap, bounds table size)
+		await db.prepare("DELETE FROM rate_limit WHERE created_at < ?").bind(since).run();
+		const row = await db.prepare("SELECT COUNT(*) as cnt FROM rate_limit WHERE bucket = ? AND created_at > ?")
+			.bind(bucket, since).first<{ cnt: number }>();
+		if ((row?.cnt ?? 0) >= maxCount) {
+			return { ok: false, reason: "该网络请求过于频繁，请稍后再试" };
+		}
+		await db.prepare("INSERT INTO rate_limit (bucket, created_at) VALUES (?, ?)").bind(bucket, now).run();
+	} catch (err) {
+		// rate_limit table may be missing on legacy DBs — fail open (allow) rather than blocking
+		console.error("IP rate limit check failed:", err);
 	}
 	return { ok: true };
 }
@@ -222,7 +253,7 @@ function checkIncremental(prev: D1Result<Record<string, unknown>>, payload: Uplo
 	const flagged = (row.flagged as number) ?? 0;
 
 	if (flagged >= 2) {
-		return { ok: false, reason: "该账户已被封禁" };
+		return { ok: false, reason: "该账户已被封禁", flagged: false };
 	}
 
 	const levelDelta = payload.level - prevLevel;
@@ -422,8 +453,8 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
 	// 3. Ed25519 signature verification
 	//   a) Look up registered public key for this user (if exists)
 	const existingPlayer = await env.DB.prepare(
-		"SELECT public_key, level, gold, flagged FROM players WHERE user_id = ?"
-	).bind(payload.userId).first<{ public_key: string; level: number; gold: number; flagged: number }>();
+		"SELECT public_key, level, gold, total_xp, reported_at, flagged FROM players WHERE user_id = ?"
+	).bind(payload.userId).first<{ public_key: string; level: number; gold: number; total_xp: number; reported_at: number; flagged: number }>();
 
 	let expectedPublicKey: string;
 
@@ -439,7 +470,7 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
 	}
 
 	// Verify signature
-	const signedData = buildSignedData(payload);
+	const signedData = buildSignedData(payload as unknown as Record<string, unknown>);
 	const sigValid = await verifySignature(expectedPublicKey, payload.signature, signedData);
 	if (!sigValid) {
 		return json({ ok: false, error: "签名验证失败 — 数据可能被篡改" }, 403);
@@ -458,19 +489,26 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
 	// 4.5. Action-log balance validation (anti-cheat)
 	// Sum all server-validated gold/xp changes and compare with claimed totals
 	if (existingPlayer) {
-		const prevGold = (existingPlayer as Record<string, number>).gold ?? 0;
-		const prevXp = (existingPlayer as Record<string, number>).total_xp ?? 0;
+		const prevGold = existingPlayer.gold ?? 0;
+		const prevXp = existingPlayer.total_xp ?? 0;
 		const goldDelta = payload.gold - prevGold;
 		const xpDelta = payload.totalXp - prevXp;
 
 		// Sum server-validated income from action_log since last report
-		const lastReport = (existingPlayer as Record<string, number>).reported_at ?? 0;
-		const validatedIncome = await env.DB.prepare(
+		// Wrapped in try/catch: action_log table may be missing on legacy DBs (schema-v2 not applied).
+		// On failure, skip flagging rather than blocking the upload (degrade gracefully).
+		const lastReport = existingPlayer.reported_at ?? 0;
+		let validatedGold = 0;
+		let validatedXp = 0;
+		try {
+			const validatedIncome = await env.DB.prepare(
 				`SELECT COALESCE(SUM(gold_change), 0) as total_gold, COALESCE(SUM(xp_change), 0) as total_xp FROM action_log WHERE user_id = ? AND created_at > ?`
 			).bind(payload.userId, lastReport).first<{ total_gold: number; total_xp: number }>();
-
-		const validatedGold = validatedIncome?.total_gold ?? 0;
-		const validatedXp = validatedIncome?.total_xp ?? 0;
+			validatedGold = validatedIncome?.total_gold ?? 0;
+			validatedXp = validatedIncome?.total_xp ?? 0;
+		} catch (err) {
+			console.error("action_log query failed (table may be missing):", err);
+		}
 
 		// Allow 3x tolerance for unvalidated local encounters (offline/fallback)
 		// If server-validated income is significant but player claims way more, flag
@@ -485,7 +523,7 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
 	// 5. Upsert
 	const newFlag = incremental.flagged ? 1 : (existingPlayer?.flagged ?? 0);
 	const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-	const ipHash = hashIp(ip);
+	const ipHash = await hashIp(ip, env.IP_HASH_SALT ?? "");
 
 	try {
 		await env.DB.prepare(`
@@ -494,8 +532,9 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
 				gold, total_xp, total_edits, total_commands, total_trainings,
 				martial_skills, weapon, achievements, bosses_defeated,
 				created_at, last_active_at, reported_at, version,
-				ip_hash, report_count, flagged, public_key, user_email, mbti_type, mbti_scores
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+				ip_hash, report_count, flagged, public_key, user_email, mbti_type, mbti_scores,
+				faction_id, profession_id, talents, talent_points
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(user_id) DO UPDATE SET
 				character_id = excluded.character_id,
 				character_name = excluded.character_name,
@@ -518,7 +557,11 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
 				flagged = excluded.flagged,
 				user_email = excluded.user_email,
 				mbti_type = excluded.mbti_type,
-				mbti_scores = excluded.mbti_scores
+				mbti_scores = excluded.mbti_scores,
+				faction_id = excluded.faction_id,
+				profession_id = excluded.profession_id,
+				talents = excluded.talents,
+				talent_points = excluded.talent_points
 		`).bind(
 			payload.userId, payload.characterId, payload.characterName,
 			payload.level, payload.title,
@@ -528,7 +571,8 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
 			payload.bossesDefeated ?? 0,
 			payload.createdAt, payload.lastActiveAt, payload.reportedAt,
 			payload.version, ipHash, newFlag, expectedPublicKey,
-			payload.email ?? null, payload.mbtiType ?? null, payload.mbtiScores ?? null
+			payload.email ?? null, payload.mbtiType ?? null, payload.mbtiScores ?? null,
+			payload.factionId ?? null, payload.professionId ?? null, payload.talents ?? null, payload.talentPoints ?? 0
 		).run();
 
 		// Update global stats
@@ -589,24 +633,29 @@ async function handleLeaderboard(url: URL, env: Env): Promise<Response> {
  * GET /api/player/:id — 查看某玩家详情
  */
 async function handlePlayer(userId: string, env: Env): Promise<Response> {
+	// 最小披露原则：只返回排行榜可见的列，剔除 user_email / ip_hash / public_key /
+	// report_count / flagged / created_at 等敏感或内部字段（与 handleLeaderboard 列集一致）
 	const player = await env.DB.prepare(`
-		SELECT * FROM players WHERE user_id = ? AND flagged < 2
-	`).bind(userId).first();
+		SELECT user_id, character_name, level, title, gold, total_xp,
+		       total_edits, total_commands, total_trainings,
+		       martial_skills, weapon, achievements, bosses_defeated,
+		       last_active_at, reported_at
+		FROM players WHERE user_id = ? AND flagged < 2
+	`).bind(userId).first<{ level: number; total_xp: number }>();
 
 	if (!player) {
 		return json({ ok: false, error: "玩家不存在" }, 404);
 	}
 
-	const p = player as Record<string, number>;
 	const rankResult = await env.DB.prepare(`
 		SELECT COUNT(*) + 1 as rank FROM players
 		WHERE flagged < 2 AND (level > ? OR (level = ? AND total_xp > ?))
-	`).bind(p.level, p.level, p.total_xp).first();
+	`).bind(player.level, player.level, player.total_xp).first<{ rank: number }>();
 
 	return json({
 		ok: true,
 		player,
-		rank: (rankResult as Record<string, number>)?.rank ?? -1,
+		rank: rankResult?.rank ?? -1,
 	});
 }
 
@@ -715,23 +764,53 @@ async function handleMatch(userId: string, env: Env): Promise<Response> {
  * Input: { userId, level, weaponAtk, currentHp, maxHp }
  */
 async function handleEncounter(request: Request, env: Env): Promise<Response> {
-	let body: { userId: string; level: number; weaponAtk: number; currentHp: number; maxHp: number };
+	let body: { userId: string; level: number; weaponAtk: number; currentHp: number; maxHp: number; publicKey?: string; signature?: string };
 	try {
 		body = await request.json() as typeof body;
 	} catch {
 		return json({ ok: false, error: "Invalid JSON" }, 400);
 	}
 
-	const { userId, level, weaponAtk, currentHp, maxHp } = body;
+	const { userId, level, weaponAtk, currentHp, maxHp, publicKey, signature } = body;
 	if (!userId || level < 1) {
 		return json({ ok: false, error: "Missing required fields" }, 400);
 	}
 
-	// Per-action rate limit: min 8 seconds between encounters
+	// ── Auth: Ed25519 signature verification ──
+	// Look up the player to get the authoritative level + registered public key.
+	const player = await env.DB.prepare(
+		"SELECT level, public_key FROM players WHERE user_id = ?"
+	).bind(userId).first<{ level: number; public_key: string }>();
+
+	// Authoritative level: use the DB-recorded level for registered users (anti-inflation).
+	// For new users (not yet uploaded), trust the client level as the starting point.
+	const authoritativeLevel = player?.level ?? level;
+
+	// Verify signature against the registered key (if registered) or the provided key (new users).
+	const expectedKey = player?.public_key ?? publicKey;
+	if (!expectedKey || !signature) {
+		return json({ ok: false, error: "缺少签名或公钥" }, 403);
+	}
+	const sigValid = await verifySignature(expectedKey, signature, buildSignedData(body as Record<string, unknown>));
+	if (!sigValid) {
+		return json({ ok: false, error: "签名验证失败" }, 403);
+	}
+
+	// ── Rate limiting ──
+	// Per-action (per-user): min 8 seconds between encounters
 	const actionLimit = await checkActionRateLimit(env.DB, userId, "encounter", 8);
 	if (!actionLimit.ok) {
 		return json({ ok: false, error: actionLimit.reason }, 429);
 	}
+	// Per-IP global: prevents multi-account reward farming (30 actions / 60s)
+	const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+	const ipLimit = await checkIpRateLimit(env.DB, await hashIp(ip, env.IP_HASH_SALT ?? ""), 60, 30);
+	if (!ipLimit.ok) {
+		return json({ ok: false, error: ipLimit.reason }, 429);
+	}
+
+	// Use authoritative level for all reward calculations
+	const lvl = authoritativeLevel;
 
 	// Read encounter weights from config
 	const weights = await getConfigJSON<number[]>(env.DB, "encounter_weights", [0.30, 0.20, 0.10, 0.10, 0.15, 0.15]);
@@ -749,8 +828,9 @@ async function handleEncounter(request: Request, env: Env): Promise<Response> {
 		}
 	}
 
-	// Skill scrolls only available at level 5+
-	if (chosenType === "skill_scroll" && level < 5) {
+	// Skill scrolls only available above configured min level (P2-5: read from game_config)
+	const skillScrollMinLevel = await getConfigFloat(env.DB, "skill_scroll_min_level", 5);
+	if (chosenType === "skill_scroll" && lvl < skillScrollMinLevel) {
 		chosenType = "gold";
 	}
 
@@ -759,8 +839,8 @@ async function handleEncounter(request: Request, env: Env): Promise<Response> {
 
 	switch (chosenType) {
 		case "character_encounter": {
-			const goldReward = addNoise(randomInt(10, 30 + level * 3));
-			const xpReward = addNoise(randomInt(15, 40 + level * 2));
+			const goldReward = addNoise(randomInt(10, 30 + lvl * 3));
+			const xpReward = addNoise(randomInt(15, 40 + lvl * 2));
 			result = {
 				type: "character_encounter",
 				location,
@@ -768,7 +848,7 @@ async function handleEncounter(request: Request, env: Env): Promise<Response> {
 				goldReward,
 				xpReward,
 			};
-			await logAction(env, { userId, actionType: "encounter", actionId: "character_encounter", resultJson: result, goldChange: goldReward, xpChange: xpReward, levelAfter: level });
+			await logAction(env, { userId, actionType: "encounter", actionId: "character_encounter", resultJson: result, goldChange: goldReward, xpChange: xpReward, levelAfter: lvl });
 			break;
 		}
 		case "event": {
@@ -783,13 +863,13 @@ async function handleEncounter(request: Request, env: Env): Promise<Response> {
 				goldReward,
 				xpReward,
 			};
-			await logAction(env, { userId, actionType: "encounter", actionId: evt.id, resultJson: result, goldChange: goldReward, xpChange: xpReward, levelAfter: level });
+			await logAction(env, { userId, actionType: "encounter", actionId: evt.id, resultJson: result, goldChange: goldReward, xpChange: xpReward, levelAfter: lvl });
 			break;
 		}
 		case "skill_scroll": {
 			const skill = randomPick(SKILL_IDS);
 			const goldReward = randomInt(5, 30);
-			const xpReward = randomInt(50, 100 + level * 3);
+			const xpReward = randomInt(50, 100 + lvl * 3);
 			result = {
 				type: "skill_scroll",
 				location,
@@ -798,16 +878,16 @@ async function handleEncounter(request: Request, env: Env): Promise<Response> {
 				goldReward,
 				xpReward,
 			};
-			await logAction(env, { userId, actionType: "encounter", actionId: "skill_scroll", resultJson: result, goldChange: goldReward, xpChange: xpReward, levelAfter: level });
+			await logAction(env, { userId, actionType: "encounter", actionId: "skill_scroll", resultJson: result, goldChange: goldReward, xpChange: xpReward, levelAfter: lvl });
 			break;
 		}
 		case "weapon_drop": {
-			const rarity = rollWeaponRarity(level);
+			const rarity = rollWeaponRarity(lvl);
 			const weaponName = randomPick(WEAPON_NAMES_BY_RARITY[rarity] ?? WEAPON_NAMES_BY_RARITY.common);
 			const elements = Object.keys(ELEMENT_SYMBOLS);
 			const weaponElement = randomPick(elements);
-			const atkBonus = Math.floor(level * (rarity === "legendary" ? 3 : rarity === "epic" ? 2.2 : rarity === "rare" ? 1.5 : rarity === "uncommon" ? 1.1 : 0.8) * serverRandom());
-			const xpReward = randomInt(10, 30 + level);
+			const atkBonus = Math.floor(lvl * (rarity === "legendary" ? 3 : rarity === "epic" ? 2.2 : rarity === "rare" ? 1.5 : rarity === "uncommon" ? 1.1 : 0.8) * serverRandom());
+			const xpReward = randomInt(10, 30 + lvl);
 			result = {
 				type: "weapon_drop",
 				location,
@@ -815,14 +895,14 @@ async function handleEncounter(request: Request, env: Env): Promise<Response> {
 				weapon: { name: weaponName, rarity, element: weaponElement, atkBonus },
 				xpReward,
 			};
-			await logAction(env, { userId, actionType: "encounter", actionId: "weapon_drop", resultJson: result, xpChange: xpReward, levelAfter: level });
+			await logAction(env, { userId, actionType: "encounter", actionId: "weapon_drop", resultJson: result, xpChange: xpReward, levelAfter: lvl });
 			break;
 		}
 		case "item_drop": {
 			const itemName = serverRandom() < 0.5 ? "疗伤丹" : "回气丸";
 			const healAmount = itemName === "疗伤丹" ? Math.floor(maxHp * 0.3) : Math.floor(maxHp * 0.15);
 			const hpRestore = Math.min(healAmount, maxHp - currentHp);
-			const xpReward = randomInt(5, 20 + level);
+			const xpReward = randomInt(5, 20 + lvl);
 			result = {
 				type: "item_drop",
 				location,
@@ -830,19 +910,19 @@ async function handleEncounter(request: Request, env: Env): Promise<Response> {
 				item: { name: itemName, hpRestore },
 				xpReward,
 			};
-			await logAction(env, { userId, actionType: "encounter", actionId: "item_drop", resultJson: result, xpChange: xpReward, hpChange: hpRestore, levelAfter: level });
+			await logAction(env, { userId, actionType: "encounter", actionId: "item_drop", resultJson: result, xpChange: xpReward, hpChange: hpRestore, levelAfter: lvl });
 			break;
 		}
 		case "gold":
 		default: {
-			const goldReward = randomInt(10 + level, 30 + level * 5);
+			const goldReward = randomInt(10 + lvl, 30 + lvl * 5);
 			result = {
 				type: "gold",
 				location,
 				description: `你在${location}的路上捡到了一个钱袋，里面有${goldReward}两银子。`,
 				goldReward,
 			};
-			await logAction(env, { userId, actionType: "encounter", actionId: "gold", resultJson: result, goldChange: goldReward, levelAfter: level });
+			await logAction(env, { userId, actionType: "encounter", actionId: "gold", resultJson: result, goldChange: goldReward, levelAfter: lvl });
 			break;
 		}
 	}
@@ -860,22 +940,46 @@ async function handleEncounter(request: Request, env: Env): Promise<Response> {
  * Input: { userId, level, weaponAtk, weaponElement, skillLevel, skillElement, bossId }
  */
 async function handleBossFight(request: Request, env: Env): Promise<Response> {
-	let body: { userId: string; level: number; weaponAtk: number; weaponElement: string; skillLevel: number; skillElement: string; bossId: string };
+	let body: { userId: string; level: number; weaponAtk: number; weaponElement: string; skillLevel: number; skillElement: string; bossId: string; publicKey?: string; signature?: string };
 	try {
 		body = await request.json() as typeof body;
 	} catch {
 		return json({ ok: false, error: "Invalid JSON" }, 400);
 	}
 
-	const { userId, level, weaponAtk, weaponElement, skillLevel, skillElement, bossId } = body;
+	const { userId, level, weaponAtk, weaponElement, skillLevel, skillElement, bossId, publicKey, signature } = body;
 	if (!userId || !bossId || level < 1) {
 		return json({ ok: false, error: "Missing required fields" }, 400);
 	}
 
-	// Per-action rate limit: min 15 seconds between boss fights
+	// ── Auth: Ed25519 signature verification ──
+	const player = await env.DB.prepare(
+		"SELECT level, public_key FROM players WHERE user_id = ?"
+	).bind(userId).first<{ level: number; public_key: string }>();
+
+	// Authoritative level: DB level for registered users, client level for new users
+	const authoritativeLevel = player?.level ?? level;
+
+	const expectedKey = player?.public_key ?? publicKey;
+	if (!expectedKey || !signature) {
+		return json({ ok: false, error: "缺少签名或公钥" }, 403);
+	}
+	const sigValid = await verifySignature(expectedKey, signature, buildSignedData(body as Record<string, unknown>));
+	if (!sigValid) {
+		return json({ ok: false, error: "签名验证失败" }, 403);
+	}
+
+	// ── Rate limiting ──
+	// Per-action (per-user): min 15 seconds between boss fights
 	const actionLimit = await checkActionRateLimit(env.DB, userId, "boss_fight", 15);
 	if (!actionLimit.ok) {
 		return json({ ok: false, error: actionLimit.reason }, 429);
+	}
+	// Per-IP global: prevents multi-account reward farming
+	const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+	const ipLimit = await checkIpRateLimit(env.DB, await hashIp(ip, env.IP_HASH_SALT ?? ""), 60, 30);
+	if (!ipLimit.ok) {
+		return json({ ok: false, error: ipLimit.reason }, 429);
 	}
 
 	const boss = BOSSES.find(b => b.id === bossId);
@@ -883,27 +987,32 @@ async function handleBossFight(request: Request, env: Env): Promise<Response> {
 		return json({ ok: false, error: "Unknown boss" }, 400);
 	}
 
-	// Level gate: player must be within 5 levels below boss or above
-	if (level < boss.level - 5) {
+	// Level gate: use authoritative level to prevent level spoofing
+	const lvl = authoritativeLevel;
+	if (lvl < boss.level - 5) {
 		return json({ ok: false, error: `等级不足，挑战${boss.name}需要至少${Math.max(1, boss.level - 5)}级` }, 400);
 	}
 
-	// Read damage multipliers from config
-	const playerDmgMult = await getConfigFloat(env.DB, "player_damage_multiplier", 1.0);
-	const bossDmgMult = await getConfigFloat(env.DB, "boss_damage_multiplier", 1.0);
-	const elementBonusMult = await getConfigFloat(env.DB, "element_bonus_multiplier", 1.5);
+	// Read damage multipliers from game_config (P2-5: use schema-v2 keys)
+	// boss_atk_scale: Boss 攻击力全局缩放；boss_hp_scale: Boss 血量全局缩放
+	// element_overcome_multiplier: 克制伤害倍率；element_overcome_reduction: 被克制衰减系数
+	const bossAtkScale = await getConfigFloat(env.DB, "boss_atk_scale", 1.0);
+	const bossHpScale = await getConfigFloat(env.DB, "boss_hp_scale", 1.0);
+	const elementBonusMult = await getConfigFloat(env.DB, "element_overcome_multiplier", 1.5);
+	const elementReduction = await getConfigFloat(env.DB, "element_overcome_reduction", 0.7);
 
 	// --- Auto Battle Simulation ---
 	const logs: string[] = [];
 
-	// Player stats
-	const playerBaseAtk = 10 + level * 3 + weaponAtk;
-	const playerBaseDef = 5 + level * 1.5;
-	const playerHpMax = 100 + level * 15;
+	// Player stats (scale with authoritative level)
+	const playerBaseAtk = 10 + lvl * 3 + weaponAtk;
+	const playerBaseDef = 5 + lvl * 1.5;
+	const playerHpMax = 100 + lvl * 15;
 	let playerHp = playerHpMax;
 
-	// Boss stats
-	let bossHp = boss.hp;
+	// Boss stats (apply config scaling)
+	let bossHp = Math.floor(boss.hp * bossHpScale);
+	const bossAtk = Math.floor(boss.atk * bossAtkScale);
 
 	const maxRounds = 30;
 	let round = 0;
@@ -922,7 +1031,7 @@ async function handleBossFight(request: Request, env: Env): Promise<Response> {
 			playerDmg = Math.floor(playerDmg * elementBonusMult);
 			logs.push(`🔄 第${round}回合: 你的武器属性克制${boss.name}！造成 ${Math.floor(playerDmg)} 伤害`);
 		} else if (weaponChart && weaponChart.losesTo === boss.element) {
-			playerDmg = Math.floor(playerDmg * 0.7);
+			playerDmg = Math.floor(playerDmg * elementReduction);
 			logs.push(`💨 第${round}回合: 你的武器属性被克制，仅造成 ${Math.floor(playerDmg)} 伤害`);
 		} else {
 			logs.push(`🗡 第${round}回合: 你造成 ${Math.floor(playerDmg)} 伤害`);
@@ -930,29 +1039,26 @@ async function handleBossFight(request: Request, env: Env): Promise<Response> {
 
 		// Skill bonus (every 3 rounds)
 		if (round % 3 === 0 && skillLevel > 0) {
-			const skillDmg = Math.floor((playerBaseAtk * 0.5 + skillLevel * 8) * playerDmgMult);
+			const skillDmg = Math.floor(playerBaseAtk * 0.5 + skillLevel * 8);
 			playerDmg += skillDmg;
 			logs.push(`✨ 技能发动！额外造成 ${skillDmg} 伤害`);
 		}
 
-		playerDmg = Math.floor(playerDmg * playerDmgMult);
-		bossHp -= playerDmg;
+		bossHp -= Math.floor(playerDmg);
 
 		if (bossHp <= 0) {
 			logs.push(`🎉 ${boss.name} 被击败！`);
 			break;
 		}
 
-		// --- Boss attack ---
-		let bossDmg = Math.max(1, boss.atk - playerBaseDef * 0.4);
+		// --- Boss attack --- (bossAtk already includes boss_atk_scale scaling)
+		let bossDmg = Math.max(1, bossAtk - playerBaseDef * 0.4);
 
 		// Skill element defense bonus
 		const skillChart = ELEMENT_CHART[skillElement as keyof typeof ELEMENT_CHART];
 		if (skillChart && skillChart.beats === boss.element) {
 			bossDmg = Math.floor(bossDmg * 0.75);
 		}
-
-		bossDmg = Math.floor(bossDmg * bossDmgMult);
 
 		// Crit roll (10% chance)
 		if (serverRandom() < 0.10) {
@@ -1001,7 +1107,7 @@ async function handleBossFight(request: Request, env: Env): Promise<Response> {
 		userId, actionType: "boss_fight", actionId: bossId,
 		resultJson: fightResult,
 		goldChange: goldReward, xpChange: xpReward,
-		hpChange, levelAfter: level,
+		hpChange, levelAfter: lvl,
 	});
 
 	return json({ ok: true, fight: fightResult });

@@ -4,7 +4,7 @@
  * 保存/加载侠客状态到 ~/.pi/agent/jinyong-xia-state.json
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, copyFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir, hostname, userInfo, platform, arch } from "node:os";
 import { createHash, generateKeyPairSync } from "node:crypto";
@@ -287,7 +287,16 @@ export function loadState(): PetState {
 		migrateSkills(state.wuxue.skills);
 
 		return state;
-	} catch {
+	} catch (err) {
+		// 存档损坏：备份原始内容供排查，再返回初始态（避免静默清档丢失证据）
+		try {
+			const raw = readFileSync(path, "utf8");
+			copyFileSync(path, path + ".corrupt.bak");
+			console.error(`[jinyong-xia] 存档损坏，已备份到 ${path}.corrupt.bak（错误: ${err}）`);
+			void raw; // 保留 raw 引用以便调试
+		} catch (bakErr) {
+			console.error(`[jinyong-xia] 存档损坏且备份失败: ${bakErr}`);
+		}
 		return createInitialPetState();
 	}
 }
@@ -296,5 +305,8 @@ export function saveState(state: PetState): void {
 	state.lastActiveAt = Date.now();
 	const path = getStatePath();
 	ensureDir(path);
-	writeFileSync(path, JSON.stringify(state, null, 2), "utf8");
+	// 原子写：先写 .tmp 再 rename，避免写入中途崩溃导致存档损坏
+	const tmp = path + ".tmp";
+	writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
+	renameSync(tmp, path);
 }

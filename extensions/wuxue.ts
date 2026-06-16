@@ -120,6 +120,7 @@ export function createInitialState(): WuxueState {
 		skills, achievements: [],
 		totalTrainings: 0, totalFeeds: 0, totalCommands: 0, totalEdits: 0, totalErrors: 0,
 		items: {}, attackBuff: 0, defenseBuff: 0, xpBonus: 1,
+		bossesDefeated: 0,
 	};
 }
 
