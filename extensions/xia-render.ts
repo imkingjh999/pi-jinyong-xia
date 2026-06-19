@@ -166,12 +166,20 @@ function wrapTmuxPassthrough(sequence: string): string {
 
 /** 是否支持图片显示（包括 tmux passthrough） */
 export function canShowImages(): boolean {
-	return supportsImages() || (isTmux() && detectOuterTerminal() !== "unknown");
+	let capImages: string | undefined;
+	try { capImages = getCapabilities()?.images; } catch { capImages = undefined; }
+	// iTerm2 裸跑（非 tmux）：1337 内联图片协议与 pi-tui 的 inline diff 渲染不兼容，
+	// 头像出现后会导致状态栏错乱（重复/残留/乱位）。直接禁用 PNG，回退 ANSI art。
+	// tmux 下的 iTerm2（DCS passthrough）由 tmux 全屏缓冲管理，渲染正常，保留。
+	if (capImages === "iterm2" && !isTmux()) return false;
+	return !!capImages || (isTmux() && detectOuterTerminal() !== "unknown");
 }
 
 // ─── Avatar 缓存（R2 URL → base64）
 const _avatarCache = new Map<string, { base64: string; widthPx: number; heightPx: number }>();
 let _prefetchDone = false;
+// 头像预取失败后的退避重试定时器（单例）。避免在 widget render 路径上每帧重新发起请求。
+let _prefetchRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let _onAvatarReady: (() => void) | null = null;
 
 // 通用头像缓存（用于 boss / 群侠录等非角色 ID 查找）
@@ -180,10 +188,10 @@ const _generalAvatarCache = new Map<string, { base64: string; widthPx: number; h
 /** 设置头像下载就绪回调（用于触发 Widget 刷新） */
 export function onAvatarReady(cb: () => void) {
 	_onAvatarReady = cb;
-	// 如果头像已经缓存好了（回调注册晚了），立即触发
+	// 如果头像已经缓存好了（回调注册晚了），立即触发。不置空：与 prefetchAvatars 的
+	// checkDone 保持一致，允许后续退避重试完成后再刷新（切到图片模式）。
 	if (_avatarCache.size > 0) {
 		cb();
-		_onAvatarReady = null;
 	}
 }
 
@@ -196,9 +204,11 @@ export function prefetchAvatars(): void {
 	let pending = 0;
 	let anySucceeded = false;
 	const checkDone = () => {
+		// 等整批下载完成后再触发回调，避免每个角色下载成功都重建 widget。
+		// 不置空 _onAvatarReady：允许后续退避重试 prefetch 完成后再次触发刷新。
+		if (pending > 0) return;
 		if (anySucceeded && _onAvatarReady) {
 			_onAvatarReady();
-			_onAvatarReady = null; // 只触发一次
 		}
 	};
 	for (const c of chars) {
@@ -269,12 +279,20 @@ export async function fetchAvatarByName(avatarFile: string): Promise<{ base64: s
 export function loadPortraitPng(state: PetState): { base64: string; widthPx: number; heightPx: number } | null {
 	const char = state.characterId ? _chars.getCharacter(state.characterId) : null;
 	if (!char) return null;
-	// 如果缓存为空且 prefetch 已完成（说明之前 fetch 可能失败了），重置标记以允许重试
-	if (_prefetchDone && _avatarCache.size === 0) {
-		_prefetchDone = false;
+	const cached = _avatarCache.get(char.id) ?? null;
+	// 当前角色头像缺失且预取已完成：安排一次（单例）退避重试。
+	// 关键：不在 widget render 路径上重置 _prefetchDone + 重新 fetch 全部头像——
+	// 那会让每帧 render 都发起 25 个网络请求，且头像随网络时序在 null↔data 间抖动，
+	// 导致 widget 在 图片↔ANSI 分支反复切换、行数抖动，inline TUI（iTerm2 裸跑）下
+	// 表现为状态栏重复/不停输出。预取由 onSessionStart 一次性触发。
+	if (!cached && _prefetchDone && !_prefetchRetryTimer) {
+		_prefetchRetryTimer = setTimeout(() => {
+			_prefetchRetryTimer = null;
+			_prefetchDone = false; // 允许 prefetchAvatars 再执行一次
+			prefetchAvatars();
+		}, 30000);
 	}
-	prefetchAvatars();
-	return _avatarCache.get(char.id) ?? null;
+	return cached;
 }
 
 // ─── Kitty 分块传输 ───────────────────────────────────────────────
@@ -429,19 +447,55 @@ export function renderAvatarWithLines(
 	return renderImageWithStatus(imgData, lines, maxWidth);
 }
 
-/** 构建 Widget 组件（render 每次调用时动态检查头像缓存，避免首次加载时序问题） */
+/**
+ * Widget 固定输出行数：与 image 模式的 maxHeightCells(12) 一致。
+ * 关键：widget 行数必须在整个生命周期恒定。若 ANSI(6行)→image(12行) 发生行数增加，
+ * pi-tui 的 inline diff 会把更新当作「追加」处理而不清除旧行，导致 iTerm2 裸跑下
+ * 状态栏出现两份重叠（静止一段时间、头像下载完成后触发）。
+ * 因此无论哪种模式，render 都 normalize 到 FIXED_WIDGET_ROWS：不足补空行，超出截断。
+ */
+const FIXED_WIDGET_ROWS = 12;
+
+function normalizeRows(lines: string[], n: number): string[] {
+	if (lines.length === n) return lines;
+	if (lines.length > n) return lines.slice(0, n);
+	return [...lines, ...Array<string>(n - lines.length).fill("")];
+}
+
+/**
+ * 构建 Widget 组件。
+ * 渲染模式（图片/ANSI）在首次 render 确定后固定，避免头像异步下载过程中每帧在
+ * 分支间切换导致 widget 行数抖动（图片 12 行 / ANSI art / fallback 纯文字 行数不同），
+ * inline TUI（iTerm2 裸跑）下行数抖动会表现为状态栏重复/不停输出。
+ * 头像就绪后由 onAvatarReady → updateWidget(force) 重建组件切换到图片模式。
+ * 无论何种模式，输出行数恒定 normalize 到 FIXED_WIDGET_ROWS，避免行数变化触发
+ * pi-tui 的 append 逻辑（旧行残留）。
+ */
 export function buildWidgetComponent(state: PetState, mood: Mood, theme: any) {
 	if (state.hidden) return { render: () => [], invalidate: () => {} };
 	return {
+		_mode: undefined as "image" | "ansi" | undefined,
 		_kittyImageId: undefined as number | undefined,
 		render(width: number) {
 			const statusLines = buildStatusLines(state, mood, width, theme);
-			// 每次 render 时重新检查图片能力（避免创建时捕获导致过期）
-			if (canShowImages()) {
-				const imgData = loadPortraitPng(state);
-				if (imgData) return renderImageWithStatus(imgData, statusLines, width);
+			if (this._mode === undefined) {
+				this._mode = (canShowImages() && loadPortraitPng(state)) ? "image" : "ansi";
 			}
-			return renderAnsiWithStatus(state, statusLines, width);
+			let lines: string[];
+			if (this._mode === "image") {
+				const imgData = loadPortraitPng(state);
+				if (imgData) {
+					// 复用 imageId：kitty 协议下避免每次 render 分配新 id 导致图片泄漏/重传堆积
+					if (this._kittyImageId === undefined) this._kittyImageId = allocateImageId();
+					lines = renderImageWithStatus(imgData, statusLines, width, this._kittyImageId);
+				} else {
+					this._mode = "ansi"; // 头像被逐出（罕见），回退文字
+					lines = renderAnsiWithStatus(state, statusLines, width);
+				}
+			} else {
+				lines = renderAnsiWithStatus(state, statusLines, width);
+			}
+			return normalizeRows(lines, FIXED_WIDGET_ROWS);
 		},
 		invalidate() {},
 	};

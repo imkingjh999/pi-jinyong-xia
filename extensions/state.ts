@@ -4,7 +4,7 @@
  * 保存/加载侠客状态到 ~/.pi/agent/jinyong-xia-state.json
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, copyFileSync, unlinkSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir, hostname, userInfo, platform, arch } from "node:os";
 import { createHash, generateKeyPairSync } from "node:crypto";
@@ -305,8 +305,24 @@ export function saveState(state: PetState): void {
 	state.lastActiveAt = Date.now();
 	const path = getStatePath();
 	ensureDir(path);
-	// 原子写：先写 .tmp 再 rename，避免写入中途崩溃导致存档损坏
-	const tmp = path + ".tmp";
-	writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
-	renameSync(tmp, path);
+	const data = JSON.stringify(state, null, 2);
+	// 原子写：先用“唯一”临时文件再 rename。
+	// 关键修复：旧版本用固定名 path + ".tmp"，当多个 pi 进程同时写同一份共享存档时，
+	// renameSync 会把该 tmp 文件“移走”，另一个进程 rename 时就报 ENOENT，
+	// 进而在定时器回调里变成 uncaughtException 把整个 pi 拖崩。
+	// 这里用 PID+时间戳+随机串保证每个写入者各用各的 tmp。
+	const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+	try {
+		writeFileSync(tmp, data, "utf8");
+		renameSync(tmp, path);
+	} catch (err) {
+		// tmp 可能已被并发进程/异常清理，或其他瞬时错误：清理残留后降级直写。
+		// 宁可失去“原子性”也不能丢档，更不能向上抛出（本函数运行在定时器回调里，抛出 = 杀进程）。
+		try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* ignore */ }
+		try {
+			writeFileSync(path, data, "utf8");
+		} catch (err2) {
+			console.error(`[jinyong-xia] saveState 失败 (rename err=${err}; direct-write err=${err2})`);
+		}
+	}
 }

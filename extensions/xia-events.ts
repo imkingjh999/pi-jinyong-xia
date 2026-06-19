@@ -101,7 +101,17 @@ function grantTalentPointOnLevelUp() {
 
 export function scheduleSave() {
 	if (saveTimer) clearTimeout(saveTimer);
-	saveTimer = setTimeout(async () => { _state.saveState(petState); saveTimer = null; tryTelemetryUpload(); }, 5000);
+	saveTimer = setTimeout(async () => {
+		try {
+			_state.saveState(petState);
+		} catch (err) {
+			// 防御：saveState 内部已不应抛出，但即便抛出也不能逃逸出异步定时器回调
+			// （否则会变成 unhandled rejection / uncaughtException 拖崩整个 pi）
+			console.error(`[jinyong-xia] scheduled saveState threw: ${err}`);
+		}
+		saveTimer = null;
+		tryTelemetryUpload();
+	}, 5000);
 }
 
 let _telemetryMod: any = null;
@@ -125,12 +135,50 @@ async function tryTelemetryUpload() {
 	}
 }
 
-export function updateWidget(ctx: any) {
+// Widget 内容指纹：避免在状态未实质变化时重复 setWidget 重建组件。
+// pi-tui 是 inline（非全屏）TUI，对高频 widget 重建敏感；某些终端（如 iTerm2 裸跑）
+// 下频繁重建会表现为状态栏不断追加输出。widget render 读的是 petState 实时引用，
+// 因此只在影响显示的字段变化时才真正 setWidget。
+let _widgetFingerprint = "";
+let _widgetUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+
+function computeWidgetFingerprint(): string {
+	if (!petState) return "";
+	const w = petState.wuxue as any;
+	const skills = (petState.martialSkills || []).map((s: any) => `${s.id}:${s.level ?? s.xp}`).join(",");
+	const items = Object.values(w.items || {}).reduce((a: number, b: any) => a + (b as number), 0);
+	return [
+		petState.characterId ?? "", petState.nickname ?? "",
+		w.level, Math.round(w.hp), w.maxHp, w.xp, w.xpToNext, w.gold,
+		w.attack, w.defense, w.attackBuff ?? 0, w.defenseBuff ?? 0, w.xpBonus ?? 1,
+		petState.weapon ?? "", skills, items,
+		petState.factionId ?? "", petState.professionId ?? "", (petState.talents?.length ?? 0),
+		widgetHidden ? "H" : "V", petState.hidden ? "1" : "0",
+	].join("|");
+}
+
+export function updateWidget(ctx: any, force = false) {
+	if (!ctx?.hasUI || !petState) return;
+	// 去抖：合并一次操作内连续触发的多次更新（onToolStart/End/Result + setMood 等）
+	if (_widgetUpdateTimer) clearTimeout(_widgetUpdateTimer);
+	_widgetUpdateTimer = setTimeout(() => {
+		_widgetUpdateTimer = null;
+		applyUpdateWidget(ctx, force);
+	}, 120);
+}
+
+function applyUpdateWidget(ctx: any, force: boolean) {
 	if (!ctx?.hasUI || !petState) return;
 	if (widgetHidden) {
-		ctx.ui.setWidget("jinyong-xia", undefined, { placement: "belowEditor" });
+		if (force || _widgetFingerprint !== "__hidden__") {
+			ctx.ui.setWidget("jinyong-xia", undefined, { placement: "belowEditor" });
+			_widgetFingerprint = "__hidden__";
+		}
 		return;
 	}
+	const fp = computeWidgetFingerprint();
+	if (!force && fp === _widgetFingerprint) return;
+	_widgetFingerprint = fp;
 	const theme = ctx.ui.theme;
 	ctx.ui.setWidget("jinyong-xia", (_tui: any, tuiTheme: any) => {
 		return buildWidgetComponent(petState, currentMood, tuiTheme || theme);
@@ -470,7 +518,7 @@ export function onSessionStart(_event: any, ctx: any, doBossFight: Function) {
 	flushNotifications(ctx);
 	try {
 		// 注册头像就绪回调：R2 下载完成后刷新 Widget 以显示 PNG 头像
-		onAvatarReady(() => updateWidget(ctx));
+		onAvatarReady(() => updateWidget(ctx, true));
 		// 角色选择延迟到首次 /xia 命令时触发，不再在 session_start 自动弹出
 		if (petState.wuxue.hp <= 0) petState.wuxue.hp = petState.wuxue.maxHp;
 		_wuxue.tick(petState.wuxue);
