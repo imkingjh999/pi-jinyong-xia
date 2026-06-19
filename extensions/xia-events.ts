@@ -157,8 +157,26 @@ function computeWidgetFingerprint(): string {
 	].join("|");
 }
 
+/**
+ * 安全检查 ctx 是否仍可用。
+ * 关键：ctx?.hasUI 的可选链只能挡 null/undefined，挡不住 throwing getter——
+ * session 被 newSession/fork/switchSession/reload 替换后，访问 ctx.hasUI 会触发
+ * ExtensionRunner.assertActive() 抛 "stale" 异常。
+ * 这些延迟回调（头像下载完成的 checkDone → _onAvatarReady、_widgetUpdateTimer 的
+ * setTimeout、setMood 的 setTimeout）都逃出了调用方的 try/catch，一旦 ctx 变 stale
+ * 就会变成 uncaughtException 拖崩整个 pi。此处统一捕获，stale 时静默返回 false。
+ */
+function ctxAlive(ctx: any): boolean {
+	if (!ctx) return false;
+	try {
+		return !!ctx.hasUI;
+	} catch {
+		return false;
+	}
+}
+
 export function updateWidget(ctx: any, force = false) {
-	if (!ctx?.hasUI || !petState) return;
+	if (!ctxAlive(ctx) || !petState) return;
 	// 去抖：合并一次操作内连续触发的多次更新（onToolStart/End/Result + setMood 等）
 	if (_widgetUpdateTimer) clearTimeout(_widgetUpdateTimer);
 	_widgetUpdateTimer = setTimeout(() => {
@@ -168,7 +186,7 @@ export function updateWidget(ctx: any, force = false) {
 }
 
 function applyUpdateWidget(ctx: any, force: boolean) {
-	if (!ctx?.hasUI || !petState) return;
+	if (!ctxAlive(ctx) || !petState) return;
 	if (widgetHidden) {
 		if (force || _widgetFingerprint !== "__hidden__") {
 			ctx.ui.setWidget("jinyong-xia", undefined, { placement: "belowEditor" });
