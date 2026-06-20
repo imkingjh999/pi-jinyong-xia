@@ -120,6 +120,21 @@ function isTmux(): boolean {
 	return !!process.env.TMUX;
 }
 
+/** 是否运行在「全屏缓冲型」环境（tmux / cmux / zellij 等多路复用器）。
+ *  这些环境由缓冲管理 widget 行数变化：ansi→image 行数增长不会触发 pi-tui inline diff
+ *  的 append 抖动，因此 ansi 模式可直接紧凑输出「内容 + 分隔线」，无需 normalize 到
+ *  FIXED_WIDGET_ROWS 补空白（否则头像未加载时会留下大片尾部空行）。
+ *  裸跑终端（raw Ghostty / kitty 等）无此缓冲保护，行数增长会导致状态栏重叠，必须 normalize 防抖。 */
+function hasManagedBuffer(): boolean {
+	if (isTmux()) return true;
+	if (process.env.ZELLIJ) return true;
+	// cmux 基于 Ghostty（TERM_PROGRAM=ghostty、GHOSTTY_RESOURCES_DIR 指向 cmux.app），
+	// 但不设独立 env；通过 GHOSTTY_RESOURCES_DIR 路径里的 cmux.app 识别，以区别于裸 Ghostty
+	// （裸 Ghostty 的该路径为 /Applications/Ghostty.app/... 或 homebrew 路径，不含 cmux）。
+	const ghosttyDir = process.env.GHOSTTY_RESOURCES_DIR || "";
+	return ghosttyDir.includes("cmux");
+}
+
 let _cachedOuterTerminal: string | undefined;
 
 function detectViaProcessTree(): string {
@@ -462,6 +477,11 @@ function normalizeRows(lines: string[], n: number): string[] {
 	return [...lines, ...Array<string>(n - lines.length).fill("")];
 }
 
+/** 横向分隔线：纯 ANSI 模式下作为 widget 最后一行，隔开本 widget 与下方其他 widget（如 pi-a2a）。 */
+function renderSeparatorLine(width: number, theme: any): string {
+	return theme.fg("dim", "─".repeat(Math.max(0, width)));
+}
+
 /**
  * 构建 Widget 组件。
  * 渲染模式（图片/ANSI）在首次 render 确定后固定，避免头像异步下载过程中每帧在
@@ -495,7 +515,16 @@ export function buildWidgetComponent(state: PetState, mood: Mood, theme: any) {
 			} else {
 				lines = renderAnsiWithStatus(state, statusLines, width);
 			}
-			return normalizeRows(lines, FIXED_WIDGET_ROWS);
+			// 防抖（normalize 12 行）只在「裸跑 + 支持图」时需要：ansi 可能异步切 image，
+			// 裸跑环境无全屏缓冲保护，行数增加会触发 pi-tui inline diff 的 append 导致状态栏重叠。
+			// image 与 ansi 模式统一走此判断——之前 image 模式有无条件 normalize，导致 cmux/tmux 等
+			// 多路复用器在头像下载后切到 image 模式仍被撑到 12 行，留下大片尾部空白。
+			// tmux/cmux/zellij 等多路复用器有全屏缓冲管理行数变化，无抖动；iTerm2 裸跑 canShowImages 恒 false 不切 image，无抖动。
+			if (!hasManagedBuffer() && canShowImages()) {
+				return normalizeRows(lines, FIXED_WIDGET_ROWS);
+			}
+			// 其余情况（多路复用器下 ansi/image / 不支持图环境）：紧凑输出「内容 + 分隔线」，去掉尾部空 padding。
+			return [...lines, renderSeparatorLine(width, theme)];
 		},
 		invalidate() {},
 	};
